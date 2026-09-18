@@ -9,7 +9,11 @@
 # whose static targets are the bucket/prefix pairs to watch. Credentials
 # come from an existing Secret; the chart never renders one.
 apiVersion: v2
-name: s3-exporter
+# `helm-` prefix, like helm-umami: the chart is pushed as an OCI artifact
+# to oci://gitea.zen.lofi/sfi/<chart name>, and the IMAGE built from this
+# repo is gitea.zen.lofi/sfi/s3-exporter. They must not share a path — a
+# same-named chart push replaces the image's tag (v1.0.0 did exactly that).
+name: helm-s3-exporter
 description: Prometheus exporter for S3 bucket freshness and size (probe model). Fork of ribbybibby/s3_exporter.
 type: application
 sources:

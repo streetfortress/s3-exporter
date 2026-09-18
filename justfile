@@ -1,8 +1,8 @@
 # Local checks (mirror what CI runs on every push).
 check:
     go vet ./... && go test ./...
-    helm lint charts/s3-exporter
-    helm template t charts/s3-exporter --set probe.enabled=true --set 'probe.targets={b/p/}' >/dev/null
+    helm lint charts/helm-s3-exporter
+    helm template t charts/helm-s3-exporter --set probe.enabled=true --set 'probe.targets={b/p/}' >/dev/null
 
 # Build the image locally as s3-exporter:dev.
 image:
