@@ -1,219 +1,296 @@
 # s3-exporter
 
+A probe-style Prometheus exporter for S3 buckets. One `ListObjects` per
+probe, answering three questions about everything under a prefix: how
+many objects, how big, and **when the newest one was written**.
+
 SFI's fork of [ribbybibby/s3_exporter](https://github.com/ribbybibby/s3_exporter)
-(unmaintained upstream; last release 2021). A probe-style Prometheus
-exporter for S3 buckets: one ListObjects per probe, answering how many
-objects are under a prefix, how big they are, and — the reason for the
-fork — when the newest one was written. SFI uses it as the bucket-side
-ground truth for backup freshness (deployments#323).
+(unmaintained upstream; last release 2021). Metric names and the `/probe`
+contract are upstream's; what changed is listed at the end. SFI runs it as
+the bucket-side ground truth for backup freshness: every other backup
+signal comes from the unit that claims to have written, and this asks the
+bucket instead.
 
-What changed from upstream:
+## Overview
 
-- **AWS SDK v2** and Go 1.26 (upstream was on the deprecated v1 SDK,
-  vendored, Go 1.15); `prometheus/common/log` → `log/slog`.
-- **`/probe?target=BUCKET/PREFIX`** alongside `bucket=`/`prefix=`: the
-  prometheus-operator `Probe` CR passes a single `target`, so a static
-  target list of `bucket/prefix` strings just works.
-- **A refused listing is a metric, not a panic.** Upstream emitted the
-  failure sample with the wrong label count and panicked the collector;
-  now `s3_list_success 0` comes back with a 200, which is the sample the
-  wrong-key / exceeded-cap case exists to produce.
-- `--s3.region`, for stores that want one even when the endpoint decides it.
-- **Helm chart** in `charts/helm-s3-exporter` (Deployment, Service,
-  optional `Probe`), and a `Containerfile` (static binary on scratch,
-  non-root). Both published from `.gitea/workflows/release.yaml` on
-  `vX.Y.Z` tags — `just tag X.Y.Z` — as `oci://gitea.zen.lofi/sfi/helm-s3-exporter`
-  and `gitea.zen.lofi/sfi/s3-exporter:X.Y.Z`. Different names on purpose:
-  the registry keys artifacts by path and tag regardless of type, and
-  1.0.0's same-named chart push replaced the image.
+### The probe model
 
-Metric names and the `/probe` contract are unchanged, so upstream's
-documentation below still applies.
-
----
-
-# Upstream README — AWS S3 Exporter
-
-This exporter provides metrics for AWS S3 bucket objects by querying the API with a given bucket and prefix and constructing metrics based on the returned objects.
-
-I find it useful for ensuring that backup jobs and batch uploads are functioning by comparing the growth in size/number of objects over time, or comparing the last modified date to an expected value.
-
-## Building
+Like blackbox_exporter, the exporter has no targets of its own. Prometheus
+asks it to look at one bucket and prefix per scrape:
 
 ```
-make
+GET /probe?bucket=BUCKET&prefix=PREFIX[&delimiter=D]
+GET /probe?target=BUCKET/PREFIX
 ```
 
-## Running
+The two forms are equivalent. `target=` exists because the
+prometheus-operator `Probe` CR, and the usual blackbox relabelling in a
+`ScrapeConfig`, pass a single parameter: the text up to the first `/` is
+the bucket, the rest (which may be empty, and usually ends in `/`) is the
+prefix. `bucket=` and `target=` together are a 400.
+
+The exporter lists the prefix — every page of it — and answers with
+`s3_objects`, `s3_objects_size_sum_bytes`, `s3_biggest_object_size_bytes`,
+`s3_last_modified_object_date` (a Unix timestamp; the freshness) and
+`s3_last_modified_object_size_bytes`, all labelled `bucket` and `prefix`,
+plus `s3_list_success` and `s3_list_duration_seconds`. With `delimiter=`
+it counts common prefixes instead (`s3_common_prefixes`) — "how many
+top-level directories" — and reports none of the object metrics.
+
+A listing that fails — a wrong or revoked key, the endpoint refusing, an
+account over its caps — is **a metric, not an error**: the probe still
+returns 200 with `s3_list_success 0`. That is the sample the failure case
+exists to produce, and the one to alert on first, because every other
+series is blind while it is 0. (Upstream panicked here instead.)
+
+An **empty prefix** reports `s3_objects 0` and
+`s3_last_modified_object_date` as the zero time (`-6.795364578e+09`), so
+"age of newest object" is enormous rather than absent. For a prefix that
+is *expected* to have content that is the right answer.
+
+`/discovery` is an `http_sd` endpoint: one target per bucket the
+credential can list, each carrying `__param_bucket`. It is the way to
+get a probe of every bucket an S3 store holds without listing them by
+hand — a fort-local store whose buckets are created by applications, say
+— at the cost of probing whole buckets rather than prefixes. See
+[Discovery](#discovery).
+
+### Runtime expectations
+
+Every probe is metadata only. **No object is ever fetched**, and the
+recommended credential cannot fetch one: on B2 that is `listBuckets` +
+`listFiles` and no `readFiles`; on an S3-compatible store, `s3:ListBucket`
+alone. A leaked exporter credential reveals what exists and when, never
+content.
+
+What a probe costs:
+
+- **Calls.** `ceil(objects / 1000)` list calls per probe — one for
+  anything under a thousand objects. On Backblaze B2 these are **Class C
+  transactions** (2,500/day free, then $0.004 per 1,000); they do not
+  touch the download-bandwidth cap. On a self-hosted store they are CPU
+  on that host.
+- **Bytes.** The response is the listing: roughly 200 bytes per object
+  (key, size, ETag, mtime). ~100 KB for a 500-object prefix. Not egress
+  in any sense that bills.
+- **Scale with object count, not bytes.** A restic repository is one
+  pack per ~16–32 MB of unique data (a 400 GB repo ≈ 15,000 objects ≈ 15
+  calls per probe); a WAL archive grows a segment at a time and only
+  shrinks by lifecycle rule. If a prefix gets large, probe it with a
+  `delimiter`, or probe a narrower prefix — not less often.
+
+**Scrape interval:** at most Prometheus's staleness window (5 m by
+default). A series scraped less often than that is invisible to instant
+queries and to alert-rule evaluation between scrapes; alerts with a `for`
+never hold. Seven targets every 5 m is ~2,000 B2 Class C calls a day.
+Wrap rule expressions in `last_over_time(...[30m])` so one slow or timed
+out listing does not reset an alert either.
+
+## Installation
+
+Helm is the primary method. The chart and the image are built from this
+repository at the same tag and published together:
 
 ```
-./s3_exporter <flags>
+oci://gitea.zen.lofi/sfi/helm-s3-exporter     chart, version X.Y.Z
+gitea.zen.lofi/sfi/s3-exporter:X.Y.Z          image
 ```
 
-You can query a bucket and prefix combination by supplying them as parameters to /probe:
+(Different names on purpose: an OCI registry keys artifacts by path and
+tag regardless of type, and a same-named chart push replaces the image.)
 
-```
-curl localhost:9340/probe?bucket=some-bucket&prefix=some-folder/some-file.txt
-```
+One release per S3 store — the credential and the endpoint go together:
 
-### AWS Credentials
-
-The exporter creates an AWS session without any configuration. You must specify credentials yourself as documented [here](https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/configuring-sdk.html).
-
-Remember, if you want to load credentials from `~/.aws/config` then you need to to set:
-
-```
-export AWS_SDK_LOAD_CONFIG=true
-```
-
-### Docker
-
-```
-docker pull ribbybibby/s3-exporter
-```
-
-You will need to supply AWS credentials to the container, as mentioned in the previous section, either by setting the appropriate environment variables with `-e`, or by mounting your `~/.aws/` directory with `-v`.
-
-```
-# Environment variables
-docker run -p 9340:9340 -e AWS_ACCESS_KEY_ID=<value> -e AWS_SECRET_ACCESS_KEY=<value> -e AWS_REGION=<value> s3-exporter:latest <flags>
-# Mounted volume
-docker run -p 9340:9340 -e AWS_SDK_LOAD_CONFIG=true -e HOME=/ -v $HOME/.aws:/.aws s3-exporter:latest <flags>
+```yaml
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: s3-exporter-b2
+  namespace: monitoring-central
+spec:
+  chartRef: {kind: OCIRepository, name: helm-s3-exporter, namespace: flux-system}
+  values:
+    fullnameOverride: s3-exporter-b2
+    existingSecret: s3-exporter-b2-credentials    # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+    s3:
+      endpointURL: https://s3.us-west-004.backblazeb2.com
+      region: us-west-004                          # some stores want one even when the endpoint decides it
+      forcePathStyle: true
 ```
 
-## Flags
+Values of note: `existingSecret` (the chart never renders a Secret),
+`s3.endpointURL` / `s3.region` / `s3.forcePathStyle`, `probe.*` (an
+optional prometheus-operator `Probe` with static `bucket/prefix` targets,
+for clusters whose Prometheus selects Probes), `extraArgs`, `resources`.
+Chart `version` and `appVersion` are the same X.Y.Z, so the default image
+is the one built from the same commit.
 
-```
-  -h, --help                     Show context-sensitive help (also try --help-long and --help-man).
-      --web.listen-address=":9340"
-                                 Address to listen on for web interface and telemetry.
-      --web.metrics-path="/metrics"
-                                 Path under which to expose metrics
-      --web.probe-path="/probe"  Path under which to expose the probe endpoint
-      --web.discovery-path="/discovery"
-                                 Path under which to expose service discovery
-      --s3.endpoint-url=""       Custom endpoint URL
-      --s3.disable-ssl           Custom disable SSL
-      --s3.force-path-style      Custom force path style
-      --log.level="info"         Only log messages with the given severity or above. Valid levels: [debug, info, warn, error, fatal]
-      --log.format="logger:stderr"
-                                 Set the log target and format. Example: "logger:syslog?appname=bob&local=7" or "logger:stdout?json=true"
-      --version                  Show application version.
-```
+Also possible: `docker run gitea.zen.lofi/sfi/s3-exporter:X.Y.Z` with the
+credential in the environment and the flags below, or `go build .` — the
+binary is static and listens on `:9340`.
 
-Flags can also be set as environment variables, prefixed by `S3_EXPORTER_`. For example: `S3_EXPORTER_S3_ENDPOINT_URL=http://s3.example.local`.
+## Configuration
 
-## Metrics
+### Static targets (ScrapeConfig)
 
-| Metric                             | Meaning                                                                                                     | Labels                    |
-| ---------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------- |
-| s3_biggest_object_size_bytes       | The size of the largest object.                                                                             | bucket, prefix            |
-| s3_common_prefixes                 | A count of all the keys between the prefix and the next occurrence of the string specified by the delimiter | bucket, prefix, delimiter |
-| s3_last_modified_object_date       | The modification date of the most recently modified object.                                                 | bucket, prefix            |
-| s3_last_modified_object_size_bytes | The size of the object that was modified most recently.                                                     | bucket, prefix            |
-| s3_list_duration_seconds           | The duration of the ListObjects operation                                                                   | bucket, prefix, delimiter |
-| s3_list_success                    | Did the ListObjects operation complete successfully?                                                        | bucket, prefix, delimiter |
-| s3_objects_size_sum_bytes          | The sum of the size of all the objects.                                                                     | bucket, prefix            |
-| s3_objects                         | The total number of objects.                                                                                | bucket, prefix            |
+The shape SFI runs: a prometheus-operator `ScrapeConfig` whose static
+targets are `bucket/prefix` strings, relabelled the way blackbox targets
+are. The exporter labels every series with `bucket` and `prefix`; the
+relabelling keeps `instance` = the target string.
 
-## Common prefixes
-
-Rather than generating metrics for the objects with a particular prefix, you can
-set the `delimiter` parameter to produce a count of all the keys between the
-prefix and the next occurrence of the given delimiter.
-
-For instance:
-```
-$ curl 'localhost:9340/probe?bucket=registry-bucket&prefix=docker/registry/v2/blobs/sha256/&delimiter=/'
-# HELP s3_common_prefixes A count of all the keys between the prefix and the next occurrence of the string specified by the delimiter
-# TYPE s3_common_prefixes gauge
-s3_common_prefixes{bucket="registry-bucket",delimiter="/",prefix="docker/registry/v2/blobs/sha256/"} 133
-# HELP s3_list_duration_seconds The total duration of the list operation
-# TYPE s3_list_duration_seconds gauge
-s3_list_duration_seconds{bucket="registry-bucket",delimiter="/",prefix="docker/registry/v2/blobs/sha256/"} 0.921488535
-# HELP s3_list_success If the ListObjects operation was a success
-# TYPE s3_list_success gauge
-s3_list_success{bucket="registry-bucket",delimiter="/",prefix="docker/registry/v2/blobs/sha256/"} 1
+```yaml
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: ScrapeConfig
+metadata:
+  name: s3-b2
+  namespace: monitoring-central
+  labels:
+    monitoring.sfi/scope: central
+spec:
+  jobName: s3_b2
+  scrapeInterval: 5m          # ≤ the staleness window; see Runtime expectations
+  scrapeTimeout: 2m
+  metricsPath: /probe
+  staticConfigs:
+    - targets:
+        - sfi-pv-backups/zenbook/
+        - sfi-db-logical-backups/zenbook/
+        - sfi-db-physical-backups/sfi-prod-439bf72/sites-db-v2/wals/
+        - sfi-db-physical-backups/sfi-prod-439bf72/sites-db-v2/base/
+  relabelings:
+    - sourceLabels: [__address__]
+      targetLabel: __param_target
+    - sourceLabels: [__param_target]
+      targetLabel: instance
+    - targetLabel: __address__
+      replacement: s3-exporter-b2.monitoring-central.svc.cluster.local:9340
 ```
 
-See [this
-page](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ListingKeysUsingAPIs.html)
-for more information.
+The same in a plain `prometheus.yml`:
 
-## Prometheus
-
-### Configuration
-
-You can pass the params to a single instance of the exporter using relabelling, like so:
-
-```yml
+```yaml
 scrape_configs:
-  - job_name: "s3"
+  - job_name: s3_b2
+    scrape_interval: 5m
     metrics_path: /probe
     static_configs:
-      - targets:
-          - bucket=stuff;prefix=thing.txt;
-          - bucket=other-stuff;prefix=another-thing.gif;
+      - targets: [sfi-pv-backups/zenbook/, sfi-db-logical-backups/zenbook/]
     relabel_configs:
       - source_labels: [__address__]
-        regex: "^bucket=(.*);prefix=(.*);$"
-        replacement: "${1}"
-        target_label: "__param_bucket"
-      - source_labels: [__address__]
-        regex: "^bucket=(.*);prefix=(.*);$"
-        replacement: "${2}"
-        target_label: "__param_prefix"
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
       - target_label: __address__
-        replacement: 127.0.0.1:9340 # S3 exporter.
+        replacement: s3-exporter-b2:9340
 ```
 
-### Service Discovery
+Or the chart's `Probe` (`probe.enabled: true`, `probe.targets: [...]`),
+for a Prometheus whose `probeSelector` picks it up — same targets, same
+labels, the operator does the relabelling.
 
-Rather than defining a static list of buckets you can use the `/discovery` endpoint
-in conjunction with HTTP service discovery to discover all the buckets the
-exporter has access to.
+### Rules
 
-This should be all the config required to successfully scrape every bucket:
+What SFI alerts on, as a starting point:
 
-```yml
-scrape_configs:
-  - job_name: "s3"
-    metrics_path: /probe
-    http_sd_configs:
-      - url: http://127.0.0.1:9340/discovery
+```yaml
+- alert: B2ListingFailing                # first, and critical: everything else is blind
+  expr: last_over_time(s3_list_success{job="s3_b2"}[30m]) == 0
+  for: 30m
+- alert: B2WALStale                      # a WAL archive gets a segment at least every few minutes
+  expr: >-
+    time() - last_over_time(s3_last_modified_object_date{job="s3_b2", prefix=~".*/wals/"}[30m]) > 3600
+      and on (instance) last_over_time(s3_list_success{job="s3_b2"}[30m]) == 1
+  for: 15m
+- alert: B2BackupStale                   # nightly at slowest; an empty prefix fires too
+  expr: >-
+    time() - last_over_time(s3_last_modified_object_date{job="s3_b2", prefix!~".*/wals/"}[30m]) > 36 * 3600
+      and on (instance) last_over_time(s3_list_success{job="s3_b2"}[30m]) == 1
+  for: 15m
 ```
 
-Use `relabel_configs` to select the buckets you want to scrape:
+Growth over time is `s3_objects_size_sum_bytes` on a dashboard;
+`s3_list_duration_seconds` says when a prefix has grown enough to matter.
 
-```yml
+### Discovery
+
+`/discovery` returns `http_sd` targets, one per bucket the credential can
+list:
+
+```yaml
 scrape_configs:
-  - job_name: "s3"
+  - job_name: s3_all_buckets
     metrics_path: /probe
     http_sd_configs:
-      - url: http://127.0.0.1:9340/discovery
+      - url: http://s3-exporter-local:9340/discovery
     relabel_configs:
-      # Keep buckets that start with example-
       - source_labels: [__param_bucket]
-        action: keep
-        regex: ^example-.*
+        target_label: instance
+      - target_label: __address__
+        replacement: s3-exporter-local:9340
 ```
 
-The prefix can be set too, but be mindful that this will apply to all buckets:
+Each target arrives with `__param_bucket` set and no prefix, so this
+probes **whole buckets**. That fits a store whose buckets are the unit of
+interest and are created by something other than you — a fort-local S3
+where every application that asks for a bucket gets metrics without a
+line of config anywhere. It does not fit a backup store, where the
+question is per host per prefix inside a shared bucket; use static
+targets there. The credential needs `listBuckets` for this endpoint.
 
-```yml
-scrape_configs:
-  - job_name: "s3"
-    metrics_path: /probe
-    http_sd_configs:
-      - url: http://127.0.0.1:9340/discovery
-    params:
-      prefix: ["thing.txt"]
-```
-
-### Example Queries
-
-Return series where the last modified object date is more than 24 hours ago:
+### Flags
 
 ```
-(time() - s3_last_modified_object_date) / 3600 > 24
+--web.listen-address=":9340"     Address to listen on for web interface and telemetry
+--web.metrics-path="/metrics"    The exporter's own metrics
+--web.probe-path="/probe"
+--web.discovery-path="/discovery"
+--s3.endpoint-url=""             Custom endpoint URL (any S3-compatible store)
+--s3.region=""                   Region, for stores that want one (also AWS_REGION)
+--s3.force-path-style            Bucket in the path, not the host — most self-hosted stores
+--log.level=info
 ```
+
+Every flag is also an environment variable prefixed `S3_EXPORTER_`
+(`S3_EXPORTER_S3_ENDPOINT_URL=…`). Credentials come from the AWS SDK's
+usual chain: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in the
+environment is the one the chart uses.
+
+### Metrics
+
+| Metric | Meaning | Labels |
+| --- | --- | --- |
+| `s3_list_success` | Did the ListObjects operation complete? 0 on any failure — alert on this first | bucket, prefix, delimiter |
+| `s3_list_duration_seconds` | Wall time of the listing, all pages | bucket, prefix, delimiter |
+| `s3_last_modified_object_date` | Unix time of the most recently modified object; the zero time (−6.8e9) when the prefix is empty | bucket, prefix |
+| `s3_last_modified_object_size_bytes` | Size of that object | bucket, prefix |
+| `s3_objects` | Object count under the prefix | bucket, prefix |
+| `s3_objects_size_sum_bytes` | Total size under the prefix | bucket, prefix |
+| `s3_biggest_object_size_bytes` | Largest object under the prefix | bucket, prefix |
+| `s3_common_prefixes` | With `delimiter=`: count of common prefixes (the object metrics are not reported) | bucket, prefix, delimiter |
+
+## Development
+
+```
+just check      # go vet + go test, helm lint + template
+just image      # docker build → s3-exporter:dev
+just run https://s3.us-west-004.backblazeb2.com us-west-004
+                # runs the dev image with AWS_* from your environment; then
+                # curl 'localhost:9340/probe?target=BUCKET/PREFIX/'
+just tag X.Y.Z  # tags HEAD (must be at origin/main) and pushes; CI builds
+                # the image, then the chart, into the gitea registries
+```
+
+CI runs vet, tests, an image build and a chart lint on every push
+(`.gitea/workflows/build.yaml`); releases are `.gitea/workflows/release.yaml`.
+
+## What changed from upstream
+
+- AWS SDK v2 and Go 1.26 (upstream: the deprecated v1 SDK, vendored, Go
+  1.15); `prometheus/common/log` → `log/slog`; module renamed.
+- `/probe?target=BUCKET/PREFIX`.
+- A refused listing is `s3_list_success 0` with a 200, not a panic.
+- `--s3.region`.
+- Helm chart, `Containerfile` (static, scratch, non-root), gitea CI.
+- Docker Hub publishing, promu, goreleaser and the Makefile removed.
+
+Licensed under the Apache License 2.0, as upstream (`LICENSE`).
