@@ -1,0 +1,26 @@
+{{- if .Values.probe.enabled }}
+# One scrape of /probe per target. prometheus-operator turns each static
+# target into ?target=<it> and sets instance=<it>; the exporter splits it
+# into bucket/prefix and labels the series with both.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: {{ include "s3-exporter.fullname" . }}
+  labels:
+    {{- include "s3-exporter.labels" . | nindent 4 }}
+    {{- with .Values.probe.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  interval: {{ .Values.probe.interval }}
+  scrapeTimeout: {{ .Values.probe.scrapeTimeout }}
+  prober:
+    url: {{ include "s3-exporter.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.port }}
+    path: /probe
+  targets:
+    staticConfig:
+      static:
+        {{- range .Values.probe.targets }}
+        - {{ . | quote }}
+        {{- end }}
+{{- end }}

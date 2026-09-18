@@ -1,0 +1,60 @@
+# Stateless: every probe is one listing against the endpoint below, so
+# replicas need no coordination (and one is plenty — the scrape interval
+# is minutes, not seconds).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "s3-exporter.fullname" . }}
+  labels:
+    {{- include "s3-exporter.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "s3-exporter.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "s3-exporter.labels" . | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: s3-exporter
+          image: {{ include "s3-exporter.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --web.listen-address=:{{ .Values.port }}
+            {{- with .Values.s3.endpointURL }}
+            - --s3.endpoint-url={{ . }}
+            {{- end }}
+            {{- with .Values.s3.region }}
+            - --s3.region={{ . }}
+            {{- end }}
+            {{- if .Values.s3.forcePathStyle }}
+            - --s3.force-path-style
+            {{- end }}
+            {{- range .Values.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.existingSecret }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.port }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
