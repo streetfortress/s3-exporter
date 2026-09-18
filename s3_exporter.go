@@ -1,26 +1,32 @@
+// s3_exporter answers "what is in this bucket under this prefix" as
+// Prometheus metrics, one ListObjects per probe: how many objects, how
+// big, and — the reason SFI forked it — when the newest one was written.
+//
+// Probe model, like blackbox_exporter: GET /probe?bucket=B&prefix=P, or
+// /probe?target=B/P for the prometheus-operator Probe CR, which passes a
+// single `target`. No state, no cache; every scrape is one listing.
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/alecthomas/kingpin/v2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/prometheus/common/log"
 	"github.com/prometheus/common/version"
-	kingpin "gopkg.in/alecthomas/kingpin.v2"
-
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3iface"
 )
 
-const (
-	namespace = "s3"
-)
+const namespace = "s3"
 
 var (
 	s3ListSuccess = prometheus.NewDesc(
@@ -65,12 +71,18 @@ var (
 	)
 )
 
-// Exporter is our exporter type
+// lister is the one S3 call this exporter makes; tests supply a fake.
+type lister interface {
+	ListObjectsV2(ctx context.Context, in *s3.ListObjectsV2Input, opts ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
+}
+
+// Exporter collects one bucket/prefix (optionally by delimiter).
 type Exporter struct {
 	bucket    string
 	prefix    string
 	delimiter string
-	svc       s3iface.S3API
+	svc       lister
+	logger    *slog.Logger
 }
 
 // Describe all the metrics we export
@@ -98,32 +110,39 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	var commonPrefixes int
 
 	query := &s3.ListObjectsV2Input{
-		Bucket:    aws.String(e.bucket),
-		Prefix:    aws.String(e.prefix),
-		Delimiter: aws.String(e.delimiter),
+		Bucket: aws.String(e.bucket),
+		Prefix: aws.String(e.prefix),
+	}
+	if e.delimiter != "" {
+		query.Delimiter = aws.String(e.delimiter)
 	}
 
 	// Continue making requests until we've listed and compared the date of every object
 	startList := time.Now()
 	for {
-		resp, err := e.svc.ListObjectsV2(query)
+		resp, err := e.svc.ListObjectsV2(context.Background(), query)
 		if err != nil {
-			log.Errorln(err)
+			e.logger.Error("list failed", "bucket", e.bucket, "prefix", e.prefix, "err", err)
+			// Upstream emitted this with two label values for a three-label
+			// metric, which panics the collector — so a refused listing
+			// (a wrong key, an exceeded cap) produced no s3_list_success 0,
+			// the one sample that case exists to produce.
 			ch <- prometheus.MustNewConstMetric(
-				s3ListSuccess, prometheus.GaugeValue, 0, e.bucket, e.prefix,
+				s3ListSuccess, prometheus.GaugeValue, 0, e.bucket, e.prefix, e.delimiter,
 			)
 			return
 		}
-		commonPrefixes = commonPrefixes + len(resp.CommonPrefixes)
+		commonPrefixes += len(resp.CommonPrefixes)
 		for _, item := range resp.Contents {
 			numberOfObjects++
-			totalSize = totalSize + *item.Size
-			if item.LastModified.After(lastModified) {
+			size := aws.ToInt64(item.Size)
+			totalSize += size
+			if item.LastModified != nil && item.LastModified.After(lastModified) {
 				lastModified = *item.LastModified
-				lastObjectSize = *item.Size
+				lastObjectSize = size
 			}
-			if *item.Size > biggestObjectSize {
-				biggestObjectSize = *item.Size
+			if size > biggestObjectSize {
+				biggestObjectSize = size
 			}
 		}
 		if resp.NextContinuationToken == nil {
@@ -131,7 +150,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		}
 		query.ContinuationToken = resp.NextContinuationToken
 	}
-	listDuration := time.Now().Sub(startList).Seconds()
+	listDuration := time.Since(startList).Seconds()
 
 	ch <- prometheus.MustNewConstMetric(
 		s3ListSuccess, prometheus.GaugeValue, 1, e.bucket, e.prefix, e.delimiter,
@@ -162,21 +181,36 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
-func probeHandler(w http.ResponseWriter, r *http.Request, svc s3iface.S3API) {
-	bucket := r.URL.Query().Get("bucket")
+// probeTarget resolves the request's bucket and prefix. `bucket` (+
+// `prefix`) is upstream's form; `target=bucket/prefix` is the one a
+// prometheus-operator Probe can express, since it passes one parameter.
+func probeTarget(r *http.Request) (bucket, prefix string, err error) {
+	q := r.URL.Query()
+	bucket, prefix = q.Get("bucket"), q.Get("prefix")
+	if target := q.Get("target"); target != "" {
+		if bucket != "" {
+			return "", "", errors.New("give either target or bucket, not both")
+		}
+		bucket, prefix, _ = strings.Cut(target, "/")
+	}
 	if bucket == "" {
-		http.Error(w, "bucket parameter is missing", http.StatusBadRequest)
+		return "", "", errors.New("bucket parameter is missing (bucket=B&prefix=P, or target=B/P)")
+	}
+	return bucket, prefix, nil
+}
+
+func probeHandler(w http.ResponseWriter, r *http.Request, svc lister, logger *slog.Logger) {
+	bucket, prefix, err := probeTarget(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	prefix := r.URL.Query().Get("prefix")
-	delimiter := r.URL.Query().Get("delimiter")
-
 	exporter := &Exporter{
 		bucket:    bucket,
 		prefix:    prefix,
-		delimiter: delimiter,
+		delimiter: r.URL.Query().Get("delimiter"),
 		svc:       svc,
+		logger:    logger,
 	}
 
 	registry := prometheus.NewRegistry()
@@ -192,98 +226,98 @@ type discoveryTarget struct {
 	Labels  map[string]string `json:"labels"`
 }
 
-func discoveryHandler(w http.ResponseWriter, r *http.Request, svc s3iface.S3API) {
-	result, err := svc.ListBuckets(&s3.ListBucketsInput{})
+// discoveryHandler is upstream's http_sd: one target per bucket the
+// credential can list. Kept for parity; the SFI deployment lists
+// prefixes it knows from the manifests instead.
+func discoveryHandler(w http.ResponseWriter, r *http.Request, svc *s3.Client, logger *slog.Logger) {
+	result, err := svc.ListBuckets(r.Context(), &s3.ListBucketsInput{})
 	if err != nil {
-		log.Errorln(err)
+		logger.Error("list buckets failed", "err", err)
 		http.Error(w, "error listing buckets", http.StatusInternalServerError)
 		return
 	}
 
 	targets := []discoveryTarget{}
 	for _, b := range result.Buckets {
-		name := aws.StringValue(b.Name)
-		if name != "" {
-			t := discoveryTarget{
-				Targets: []string{r.Host},
-				Labels: map[string]string{
-					"__param_bucket": name,
-				},
-			}
-			targets = append(targets, t)
-		}
+		name := aws.ToString(b.Name)
+		targets = append(targets, discoveryTarget{
+			Targets: []string{r.Host},
+			Labels: map[string]string{
+				"__param_bucket": name,
+				"bucket":         name,
+			},
+		})
 	}
 
 	data, err := json.Marshal(targets)
 	if err != nil {
-		http.Error(w, "error marshalling json", http.StatusInternalServerError)
+		http.Error(w, "error marshalling targets", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(data)
 }
 
-func init() {
-	prometheus.MustRegister(version.NewCollector(namespace + "_exporter"))
-}
-
 func main() {
 	var (
-		app            = kingpin.New(namespace+"_exporter", "Export metrics for S3 certificates").DefaultEnvars()
+		app            = kingpin.New(namespace+"_exporter", "Export metrics for S3 buckets and objects").DefaultEnvars()
 		listenAddress  = app.Flag("web.listen-address", "Address to listen on for web interface and telemetry.").Default(":9340").String()
 		metricsPath    = app.Flag("web.metrics-path", "Path under which to expose metrics").Default("/metrics").String()
 		probePath      = app.Flag("web.probe-path", "Path under which to expose the probe endpoint").Default("/probe").String()
 		discoveryPath  = app.Flag("web.discovery-path", "Path under which to expose service discovery").Default("/discovery").String()
 		endpointURL    = app.Flag("s3.endpoint-url", "Custom endpoint URL").Default("").String()
-		disableSSL     = app.Flag("s3.disable-ssl", "Custom disable SSL").Bool()
 		forcePathStyle = app.Flag("s3.force-path-style", "Custom force path style").Bool()
+		region         = app.Flag("s3.region", "Region (also AWS_REGION); some S3-compatible stores want one even when the endpoint decides it").Default("").String()
 	)
 
-	log.AddFlags(app)
 	app.Version(version.Print(namespace + "_exporter"))
 	app.HelpFlag.Short('h')
 	kingpin.MustParse(app.Parse(os.Args[1:]))
 
-	var sess *session.Session
-	var err error
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
-	sess, err = session.NewSession()
+	// Credentials from the environment (AWS_ACCESS_KEY_ID /
+	// AWS_SECRET_ACCESS_KEY) or the usual SDK chain.
+	var loadOpts []func(*config.LoadOptions) error
+	if *region != "" {
+		loadOpts = append(loadOpts, config.WithRegion(*region))
+	}
+	cfg, err := config.LoadDefaultConfig(context.Background(), loadOpts...)
 	if err != nil {
-		log.Errorln("Error creating sessions ", err)
+		logger.Error("loading AWS config", "err", err)
+		os.Exit(1)
 	}
+	svc := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		if *endpointURL != "" {
+			o.BaseEndpoint = aws.String(*endpointURL)
+		}
+		o.UsePathStyle = *forcePathStyle
+	})
 
-	cfg := aws.NewConfig()
-	if *endpointURL != "" {
-		cfg.WithEndpoint(*endpointURL)
-	}
-
-	cfg.WithDisableSSL(*disableSSL)
-	cfg.WithS3ForcePathStyle(*forcePathStyle)
-
-	svc := s3.New(sess, cfg)
-
-	log.Infoln("Starting "+namespace+"_exporter", version.Info())
-	log.Infoln("Build context", version.BuildContext())
+	logger.Info("starting "+namespace+"_exporter", "version", version.Info(), "build", version.BuildContext())
 
 	http.Handle(*metricsPath, promhttp.Handler())
 	http.HandleFunc(*probePath, func(w http.ResponseWriter, r *http.Request) {
-		probeHandler(w, r, svc)
+		probeHandler(w, r, svc, logger)
 	})
 	http.HandleFunc(*discoveryPath, func(w http.ResponseWriter, r *http.Request) {
-		discoveryHandler(w, r, svc)
+		discoveryHandler(w, r, svc, logger)
 	})
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
-						 <head><title>AWS S3 Exporter</title></head>
+						 <head><title>S3 Exporter</title></head>
 						 <body>
-						 <h1>AWS S3 Exporter</h1>
-						 <p><a href="` + *probePath + `?bucket=BUCKET&prefix=PREFIX">Query metrics for objects in BUCKET that match PREFIX</a></p>
+						 <h1>S3 Exporter</h1>
+						 <p><a href="` + *probePath + `?bucket=BUCKET&prefix=PREFIX">Query metrics for objects in BUCKET that match PREFIX</a> (or ?target=BUCKET/PREFIX)</p>
 						 <p><a href='` + *metricsPath + `'>Metrics</a></p>
 						 <p><a href='` + *discoveryPath + `'>Service Discovery</a></p>
 						 </body>
 						 </html>`))
 	})
 
-	log.Infoln("Listening on", *listenAddress)
-	log.Fatal(http.ListenAndServe(*listenAddress, nil))
+	logger.Info("listening", "address", *listenAddress)
+	if err := http.ListenAndServe(*listenAddress, nil); err != nil {
+		logger.Error("serve", "err", err)
+		os.Exit(1)
+	}
 }

@@ -1,16 +1,19 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3iface"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 var (
@@ -30,16 +33,16 @@ var (
 				"s3_objects{bucket=\"mock\",prefix=\"one\"} 1",
 			},
 			ListObjectsV2Response: &s3.ListObjectsV2Output{
-				Contents: []*s3.Object{
-					&s3.Object{
+				Contents: []types.Object{
+					types.Object{
 						Key:          String("one"),
 						LastModified: Time(time.Date(2019, time.June, 13, 21, 0, 0, 0, time.UTC)),
 						Size:         Int64(1234),
 					},
 				},
 				IsTruncated: Bool(false),
-				KeyCount:    Int64(1),
-				MaxKeys:     Int64(1000),
+				KeyCount:    Int32(1),
+				MaxKeys:     Int32(1000),
 				Name:        String("mock"),
 				Prefix:      String("one"),
 			},
@@ -58,10 +61,10 @@ var (
 				"s3_objects{bucket=\"mock\",prefix=\"none\"} 0",
 			},
 			ListObjectsV2Response: &s3.ListObjectsV2Output{
-				Contents:    []*s3.Object{},
+				Contents:    []types.Object{},
 				IsTruncated: Bool(false),
-				KeyCount:    Int64(0),
-				MaxKeys:     Int64(1000),
+				KeyCount:    Int32(0),
+				MaxKeys:     Int32(1000),
 				Name:        String("mock"),
 				Prefix:      String("none"),
 			},
@@ -80,31 +83,31 @@ var (
 				"s3_objects{bucket=\"mock\",prefix=\"multiple\"} 4",
 			},
 			ListObjectsV2Response: &s3.ListObjectsV2Output{
-				Contents: []*s3.Object{
-					&s3.Object{
+				Contents: []types.Object{
+					types.Object{
 						Key:          String("multiple0"),
 						LastModified: Time(time.Date(2019, time.June, 13, 21, 0, 0, 0, time.UTC)),
 						Size:         Int64(1234),
 					},
-					&s3.Object{
+					types.Object{
 						Key:          String("multiple1"),
 						LastModified: Time(time.Date(2019, time.July, 14, 22, 0, 0, 0, time.UTC)),
 						Size:         Int64(2345),
 					},
-					&s3.Object{
+					types.Object{
 						Key:          String("multiple2"),
 						LastModified: Time(time.Date(2019, time.August, 15, 23, 0, 0, 0, time.UTC)),
 						Size:         Int64(3456),
 					},
-					&s3.Object{
+					types.Object{
 						Key:          String("multiple/0"),
 						LastModified: Time(time.Date(2019, time.September, 16, 00, 0, 0, 0, time.UTC)),
 						Size:         Int64(4567),
 					},
 				},
 				IsTruncated: Bool(false),
-				KeyCount:    Int64(4),
-				MaxKeys:     Int64(1000),
+				KeyCount:    Int32(4),
+				MaxKeys:     Int32(1000),
 				Name:        String("mock"),
 				Prefix:      String("multiple"),
 			},
@@ -122,7 +125,7 @@ var (
 			ListObjectsV2Response: &s3.ListObjectsV2Output{
 				Name:   aws.String("mock"),
 				Prefix: aws.String("mock-prefix"),
-				CommonPrefixes: []*s3.CommonPrefix{
+				CommonPrefixes: []types.CommonPrefix{
 					{
 						Prefix: aws.String("one"),
 					},
@@ -138,9 +141,7 @@ var (
 	}
 )
 
-type mockS3Client struct {
-	s3iface.S3API
-}
+type mockS3Client struct{}
 
 type s3ExporterTestCase struct {
 	Name                  string
@@ -156,7 +157,7 @@ func (tc *s3ExporterTestCase) testBody(body string, t *testing.T) {
 	for _, l := range tc.ExpectedOutputLines {
 		ok := strings.Contains(body, l)
 		if !ok {
-			t.Errorf("expected " + l)
+			t.Errorf("expected %s", l)
 		}
 	}
 }
@@ -175,11 +176,43 @@ func (tcs *s3ExporterTestCases) response(bucket, prefix string) (*s3.ListObjects
 }
 
 // TestProbeHandler iterates over a list of test cases
+// The prometheus-operator Probe CR passes one parameter, `target`; the
+// exporter reads it as bucket/prefix and answers exactly as for the
+// two-parameter form.
+func TestProbeTargetForm(t *testing.T) {
+	c := testCases[0]
+	req, _ := http.NewRequest("GET", "/probe?target="+c.Bucket+"/"+c.Prefix, nil)
+	rr := httptest.NewRecorder()
+	probeHandler(rr, req, mockSvc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c.testBody(rr.Body.String(), t)
+
+	for _, bad := range []string{"/probe", "/probe?target=", "/probe?target=mock/one&bucket=mock"} {
+		req, _ := http.NewRequest("GET", bad, nil)
+		rr := httptest.NewRecorder()
+		probeHandler(rr, req, mockSvc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("%s: want 400, got %d", bad, rr.Code)
+		}
+	}
+}
+
+// A refused listing must come back as s3_list_success 0 — the sample the
+// caps/wrong-key case exists to produce. Upstream panicked here instead.
+func TestListFailureIsAMetricNotAPanic(t *testing.T) {
+	rr, err := probe("mock", "does-not-exist", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `s3_list_success{bucket="mock",delimiter="",prefix="does-not-exist"} 0`) {
+		t.Errorf("want s3_list_success 0 in a 200 body, got %d:\n%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestProbeHandler(t *testing.T) {
 	for _, c := range testCases {
 		rr, err := probe(c.Bucket, c.Prefix, c.Delimiter)
 		if err != nil {
-			t.Errorf(err.Error())
+			t.Error(err)
 		}
 
 		c.testBody(rr.Body.String(), t)
@@ -187,7 +220,7 @@ func TestProbeHandler(t *testing.T) {
 }
 
 // ListObjectsV2 mocks out the corresponding function in the S3 client, returning the response that corresponds to the test case
-func (m *mockS3Client) ListObjectsV2(input *s3.ListObjectsV2Input) (*s3.ListObjectsV2Output, error) {
+func (m *mockS3Client) ListObjectsV2(_ context.Context, input *s3.ListObjectsV2Input, _ ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
 	r, err := testCases.response(*input.Bucket, *input.Prefix)
 	if err != nil {
 		return nil, err
@@ -212,7 +245,7 @@ func probe(bucket, prefix, delimiter string) (rr *httptest.ResponseRecorder, err
 
 	rr = httptest.NewRecorder()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		probeHandler(w, r, mockSvc)
+		probeHandler(w, r, mockSvc, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	})
 
 	handler.ServeHTTP(rr, req)
@@ -230,6 +263,10 @@ func Time(t time.Time) *time.Time {
 }
 
 func Int64(i int64) *int64 {
+	return &i
+}
+
+func Int32(i int32) *int32 {
 	return &i
 }
 
