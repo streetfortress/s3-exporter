@@ -1,3 +1,4 @@
-s3_exporter
+s3-exporter
 bin/**
 *.tar.gz
+
