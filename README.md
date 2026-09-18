@@ -1,4 +1,35 @@
-# AWS S3 Exporter
+# s3-exporter
+
+SFI's fork of [ribbybibby/s3_exporter](https://github.com/ribbybibby/s3_exporter)
+(unmaintained upstream; last release 2021). A probe-style Prometheus
+exporter for S3 buckets: one ListObjects per probe, answering how many
+objects are under a prefix, how big they are, and — the reason for the
+fork — when the newest one was written. SFI uses it as the bucket-side
+ground truth for backup freshness (deployments#323).
+
+What changed from upstream:
+
+- **AWS SDK v2** and Go 1.26 (upstream was on the deprecated v1 SDK,
+  vendored, Go 1.15); `prometheus/common/log` → `log/slog`.
+- **`/probe?target=BUCKET/PREFIX`** alongside `bucket=`/`prefix=`: the
+  prometheus-operator `Probe` CR passes a single `target`, so a static
+  target list of `bucket/prefix` strings just works.
+- **A refused listing is a metric, not a panic.** Upstream emitted the
+  failure sample with the wrong label count and panicked the collector;
+  now `s3_list_success 0` comes back with a 200, which is the sample the
+  wrong-key / exceeded-cap case exists to produce.
+- `--s3.region`, for stores that want one even when the endpoint decides it.
+- **Helm chart** in `charts/s3-exporter` (Deployment, Service, optional
+  `Probe`), and a `Containerfile` (static binary on scratch, non-root).
+  Both published from `.gitea/workflows/release.yaml` on `vX.Y.Z` tags —
+  `just tag X.Y.Z`.
+
+Metric names and the `/probe` contract are unchanged, so upstream's
+documentation below still applies.
+
+---
+
+# Upstream README — AWS S3 Exporter
 
 This exporter provides metrics for AWS S3 bucket objects by querying the API with a given bucket and prefix and constructing metrics based on the returned objects.
 

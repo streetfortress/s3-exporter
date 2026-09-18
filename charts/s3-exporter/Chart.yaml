@@ -1,0 +1,28 @@
+# Helm chart for s3-exporter — SFI's fork of ribbybibby/s3_exporter, a
+# probe-style Prometheus exporter for S3 buckets: one ListObjects per
+# probe, answering how many objects, how big, and when the newest was
+# written. The chart's own image is built from this repo; both are
+# published from CI to the gitea OCI registry (.gitea/workflows/
+# release.yaml) — cut a release with `just tag X.Y.Z`.
+#
+# Scope: Deployment + Service, and an optional prometheus-operator Probe
+# whose static targets are the bucket/prefix pairs to watch. Credentials
+# come from an existing Secret; the chart never renders one.
+apiVersion: v2
+name: s3-exporter
+description: Prometheus exporter for S3 bucket freshness and size (probe model). Fork of ribbybibby/s3_exporter.
+type: application
+sources:
+  - https://gitea.zen.lofi/sfi/s3-exporter
+  - https://github.com/ribbybibby/s3_exporter
+keywords:
+  - prometheus
+  - exporter
+  - s3
+  - backups
+# `version` is a PLACEHOLDER stamped to ${TAG#v} at `helm package` time;
+# `appVersion` is stamped to the same tag, because the image is built
+# from this repo at the same commit. 0.0.0-dev makes a non-stamped
+# publish (or local render) unmistakable.
+version: 0.0.0-dev
+appVersion: "0.0.0-dev"

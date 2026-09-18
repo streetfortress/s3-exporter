@@ -1,0 +1,53 @@
+image:
+  registry: gitea.zen.lofi
+  repository: sfi/s3-exporter
+  # Defaults to the chart's appVersion (the same tag the image was built from).
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Name of an existing Secret carrying the S3 credential as
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (the SDK's own variable
+# names). A listing-only key is enough — listBuckets + listFiles on B2,
+# s3:ListBucket on an S3-compatible store; the exporter reads no object.
+existingSecret: s3-exporter-credentials
+
+s3:
+  # The endpoint this deployment watches. One deployment per store: the
+  # credential and the endpoint go together.
+  endpointURL: ""
+  # Some S3-compatible stores want a region even when the endpoint
+  # decides it (B2: the one in its endpoint hostname, e.g. us-west-004).
+  region: ""
+  # Path-style addressing (bucket in the path, not the host). Needed for
+  # most self-hosted stores; harmless elsewhere.
+  forcePathStyle: true
+
+# A prometheus-operator Probe scraping /probe once per target. Targets
+# are "bucket/prefix" (the exporter's `target` form); the exporter labels
+# each series with bucket and prefix, and the Probe adds instance=target.
+probe:
+  enabled: false
+  interval: 15m
+  scrapeTimeout: 2m
+  # e.g.
+  #   - sfi-pv-backups/zenbook/
+  #   - sfi-db-physical-backups/sfi-prod-439bf72/sites-db-v2/wals/
+  targets: []
+  # Extra labels on the Probe object (e.g. the label a Prometheus selects on).
+  labels: {}
+
+replicas: 1
+port: 9340
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+# Extra args to the exporter (see `s3_exporter --help`).
+extraArgs: []
+
+nameOverride: ""
+fullnameOverride: ""
