@@ -19,10 +19,13 @@ What changed from upstream:
   now `s3_list_success 0` comes back with a 200, which is the sample the
   wrong-key / exceeded-cap case exists to produce.
 - `--s3.region`, for stores that want one even when the endpoint decides it.
-- **Helm chart** in `charts/s3-exporter` (Deployment, Service, optional
-  `Probe`), and a `Containerfile` (static binary on scratch, non-root).
-  Both published from `.gitea/workflows/release.yaml` on `vX.Y.Z` tags —
-  `just tag X.Y.Z`.
+- **Helm chart** in `charts/helm-s3-exporter` (Deployment, Service,
+  optional `Probe`), and a `Containerfile` (static binary on scratch,
+  non-root). Both published from `.gitea/workflows/release.yaml` on
+  `vX.Y.Z` tags — `just tag X.Y.Z` — as `oci://gitea.zen.lofi/sfi/helm-s3-exporter`
+  and `gitea.zen.lofi/sfi/s3-exporter:X.Y.Z`. Different names on purpose:
+  the registry keys artifacts by path and tag regardless of type, and
+  1.0.0's same-named chart push replaced the image.
 
 Metric names and the `/probe` contract are unchanged, so upstream's
 documentation below still applies.

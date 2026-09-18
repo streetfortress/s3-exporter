@@ -1,7 +1,9 @@
 # Release artifacts off vX.Y.Z tags: the image → the gitea container
 # registry (gitea.zen.lofi/sfi/s3-exporter:X.Y.Z), then the Helm chart →
 # the gitea package registry as an OCI artifact
-# (oci://gitea.zen.lofi/sfi/s3-exporter), with both `version` and
+# (oci://gitea.zen.lofi/sfi/helm-s3-exporter — NOT the image's path: the
+# registry keys artifacts by name+tag regardless of type, and v1.0.0's
+# chart push replaced the image), with both `version` and
 # `appVersion` stamped to X.Y.Z: the chart's default image tag IS the
 # image built from the same commit.
 #
@@ -72,6 +74,9 @@ jobs:
           helm registry login "$REGISTRY" --ca-file "$CA" \
               --username "${{ gitea.actor }}" --password-stdin \
               <<< "${{ secrets.REGISTRY_TOKEN }}"
-          helm package charts/s3-exporter --version "$VERSION" --app-version "$VERSION" -d dist
-          helm push "dist/s3-exporter-$VERSION.tgz" \
+          CHART=charts/helm-s3-exporter
+          NAME=$(sed -n 's/^name: //p' "$CHART/Chart.yaml")
+          test "$NAME" != "s3-exporter" || { echo "chart name collides with the image path"; exit 1; }
+          helm package "$CHART" --version "$VERSION" --app-version "$VERSION" -d dist
+          helm push "dist/$NAME-$VERSION.tgz" \
               "oci://$REGISTRY/$OWNER" --ca-file "$CA"
