@@ -1,4 +1,4 @@
-module gitea.zen.lofi/sfi/s3-exporter
+module github.com/streetfortress/s3-exporter
 
 go 1.26
 
