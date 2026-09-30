@@ -16,7 +16,7 @@ is unavailable to you, open a public issue that says only "security report"
 and asks for a private channel — no details — and a maintainer will answer
 with one.
 
-This is a small fork maintained by Street Fortress Industries alongside
+This is a small fork maintained by Streetfortress Industries alongside
 other work. Expect an acknowledgement within a week. There is no bounty
 programme.
 

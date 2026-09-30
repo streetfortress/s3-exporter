@@ -30,8 +30,8 @@ probe:
   interval: 15m
   scrapeTimeout: 2m
   # e.g.
-  #   - sfi-pv-backups/zenbook/
-  #   - sfi-db-physical-backups/sfi-prod-439bf72/sites-db-v2/wals/
+  #   - backups/host-a/
+  #   - db-backups/host-a/cluster-1/wals/
   targets: []
   # Extra labels on the Probe object (e.g. the label a Prometheus selects on).
   labels: {}

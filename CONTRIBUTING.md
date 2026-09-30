@@ -1,24 +1,16 @@
 # Contributing
 
-Thanks for looking. This is a maintained fork of
-[ribbybibby/s3_exporter](https://github.com/ribbybibby/s3_exporter), whose
-upstream has not released since 2021. Street Fortress Industries runs it in
-production, so changes are welcome and reviewed.
+Due to policy, our agents are restricted to working against our internal git
+instance. Any merges to main were reviewed and tested on our internal CI,
+and version tagging is done by a human.
 
-## Where the code lives
+Because of this, the best way to contribute is to report issues or make change
+requests. We're still exploring how to manage agentic oss maintainership, and
+your feedback is welcome (but I'd prefer to keep the agentic dev internal for now).
 
-The repository has two homes, and they are not equal:
+What follows is an initial CONTRIBUTING.md document with a proposed PR process (AI Generated).
 
-- **`gitea.zen.lofi/oss/s3-exporter` is the source of truth.** It is Street
-  Fortress's own gitea. It is not reachable from the internet.
-- **`github.com/streetfortress/s3-exporter` is the published copy.** A job
-  inside Street Fortress pushes `main` and the `v*` tags to it. Nothing is
-  merged on GitHub, because a merge there would make the two `main` branches
-  disagree and stop the publishing.
-
-This is the part to know before you spend time on a change: **a maintainer
-has to carry your patch across.** GitHub is where you and the maintainers
-talk, and it is not where the commit lands.
+---
 
 ## Reporting a bug or asking for a change
 
