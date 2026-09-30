@@ -76,7 +76,7 @@ var (
 			Prefix: "none",
 			ExpectedOutputLines: []string{
 				"s3_biggest_object_size_bytes{bucket=\"mock\",prefix=\"none\"} 0",
-				"s3_last_modified_object_date{bucket=\"mock\",prefix=\"none\"} -6.795364578e+09",
+				"s3_last_modified_object_date{bucket=\"mock\",prefix=\"none\"} -6.21355968e+10",
 				"s3_last_modified_object_size_bytes{bucket=\"mock\",prefix=\"none\"} 0",
 				"s3_list_success{bucket=\"mock\",delimiter=\"\",prefix=\"none\"} 1",
 				"s3_objects_size_sum_bytes{bucket=\"mock\",prefix=\"none\"} 0",

@@ -15,6 +15,9 @@ Please file an issue on github if you encounter a problem or want to request a c
   1.15); `prometheus/common/log` → `log/slog`; module renamed.
 - `/probe?target=BUCKET/PREFIX`.
 - A refused listing is `s3_list_success 0` with a 200, not a panic.
+- `s3_last_modified_object_date` comes from `Time.Unix()` (upstream:
+  `UnixNano()/1e9`, which overflows int64 for the zero time that an empty
+  prefix reports).
 - `--s3.region`.
 - Helm chart, `Containerfile` (static, scratch, non-root, multi-arch)
 - CI and release pipeline for the image + chart
@@ -191,7 +194,7 @@ environment is the one the chart uses.
 | --- | --- | --- |
 | `s3_list_success` | Did the ListObjects operation complete? 0 on any failure — alert on this first | bucket, prefix, delimiter |
 | `s3_list_duration_seconds` | Wall time of the listing, all pages | bucket, prefix, delimiter |
-| `s3_last_modified_object_date` | Unix time of the most recently modified object; the zero time (−6.8e9) when the prefix is empty | bucket, prefix |
+| `s3_last_modified_object_date` | Unix time of the most recently modified object; the zero time (−6.2e10) when the prefix is empty | bucket, prefix |
 | `s3_last_modified_object_size_bytes` | Size of that object | bucket, prefix |
 | `s3_objects` | Object count under the prefix | bucket, prefix |
 | `s3_objects_size_sum_bytes` | Total size under the prefix | bucket, prefix |
@@ -254,7 +257,7 @@ exists to produce, and the one to alert on first, because every other
 series is blind while it is 0. (Upstream panicked here instead.)
 
 An **empty prefix** reports `s3_objects 0` and
-`s3_last_modified_object_date` as the zero time (`-6.795364578e+09`), so
+`s3_last_modified_object_date` as the zero time (`-6.21355968e+10`), so
 "age of newest object" is enormous rather than absent. For a prefix that
 is *expected* to have content that is the right answer.
 

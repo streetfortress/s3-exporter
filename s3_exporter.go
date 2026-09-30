@@ -183,8 +183,13 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		s3ListDuration, prometheus.GaugeValue, listDuration, e.bucket, e.prefix, e.delimiter,
 	)
 	if e.delimiter == "" {
+		// Unix, not UnixNano()/1e9 as upstream: an empty prefix leaves
+		// lastModified at the zero time (year 1), and UnixNano is
+		// undefined — it overflows int64 — before 1678. Unix is exact
+		// for the zero time, and the metric is a second-resolution
+		// timestamp either way.
 		ch <- prometheus.MustNewConstMetric(
-			s3LastModifiedObjectDate, prometheus.GaugeValue, float64(lastModified.UnixNano()/1e9), e.bucket, e.prefix,
+			s3LastModifiedObjectDate, prometheus.GaugeValue, float64(lastModified.Unix()), e.bucket, e.prefix,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			s3LastModifiedObjectSize, prometheus.GaugeValue, float64(lastObjectSize), e.bucket, e.prefix,
