@@ -165,8 +165,20 @@ targets there. The credential needs `listBuckets` for this endpoint.
 --s3.endpoint-url=""             Custom endpoint URL (any S3-compatible store)
 --s3.region=""                   Region, for stores that want one (also AWS_REGION)
 --s3.force-path-style            Bucket in the path, not the host — most self-hosted stores
+--probe.timeout=2m               How long one probe can run when the scrape sends no timeout header
+--probe.timeout-offset=500ms     Subtracted from the scrape timeout, so a failed probe still answers
 --log.level=info
 ```
+
+Prometheus sends the scrape timeout on every scrape, in the header
+`X-Prometheus-Scrape-Timeout-Seconds`. The exporter reads that header and
+stops the listing at that point, the way `blackbox_exporter` does.
+`--probe.timeout` is the fallback for a request without the header — a
+`curl`, or a scraper that does not send it. `--probe.timeout-offset` keeps
+the probe shorter than the scrape, so `s3_list_success 0` reaches
+Prometheus before Prometheus closes the connection. A probe that ends on
+either timeout reports `s3_list_success 0`, the same sample as a refused
+listing.
 
 Every flag is also an environment variable prefixed `S3_EXPORTER_`
 (`S3_EXPORTER_S3_ENDPOINT_URL=…`). Credentials come from the AWS SDK's
@@ -271,6 +283,10 @@ What a probe costs:
 - **Bytes.** The response is the listing: roughly 200 bytes per object
   (key, size, ETag, mtime). ~100 KB for a 500-object prefix. Not egress
   in any sense that bills.
+- **A probe stops at the scrape timeout.** It does not ask for the next
+  page after Prometheus gives up, so a slow or very large prefix cannot
+  cost more than the timeout allows. Give a large prefix a longer
+  `scrape_timeout`, or probe a narrower prefix.
 - **Scale with object count, not bytes.** A restic repository is one
   pack per ~16–32 MB of unique data (a 400 GB repo ≈ 15,000 objects ≈ 15
   calls per probe); a WAL archive grows a segment at a time and only

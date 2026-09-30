@@ -28,6 +28,8 @@ s3:
 probe:
   enabled: false
   interval: 15m
+  # Prometheus sends this timeout to the exporter in a header, and the
+  # exporter stops the listing there. Raise it for a large prefix.
   scrapeTimeout: 2m
   # e.g.
   #   - backups/host-a/

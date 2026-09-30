@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,8 +38,11 @@ import (
 )
 
 var (
-	mockSvc   = &mockS3Client{}
-	testCases = s3ExporterTestCases{
+	mockSvc    = &mockS3Client{}
+	testLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	// The probe timeout the tests pass when the timeout is not the subject.
+	testTimeout = probeTimeout{fallback: 2 * time.Minute, offset: 500 * time.Millisecond}
+	testCases   = s3ExporterTestCases{
 		// Test one object in a bucket
 		s3ExporterTestCase{
 			Name:   "one object",
@@ -203,13 +207,13 @@ func TestProbeTargetForm(t *testing.T) {
 	c := testCases[0]
 	req, _ := http.NewRequest("GET", "/probe?target="+c.Bucket+"/"+c.Prefix, nil)
 	rr := httptest.NewRecorder()
-	probeHandler(rr, req, mockSvc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	probeHandler(rr, req, mockSvc, testLogger, testTimeout)
 	c.testBody(rr.Body.String(), t)
 
 	for _, bad := range []string{"/probe", "/probe?target=", "/probe?target=mock/one&bucket=mock"} {
 		req, _ := http.NewRequest("GET", bad, nil)
 		rr := httptest.NewRecorder()
-		probeHandler(rr, req, mockSvc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		probeHandler(rr, req, mockSvc, testLogger, testTimeout)
 		if rr.Code != http.StatusBadRequest {
 			t.Errorf("%s: want 400, got %d", bad, rr.Code)
 		}
@@ -265,12 +269,111 @@ func probe(bucket, prefix, delimiter string) (rr *httptest.ResponseRecorder, err
 
 	rr = httptest.NewRecorder()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		probeHandler(w, r, mockSvc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		probeHandler(w, r, mockSvc, testLogger, testTimeout)
 	})
 
 	handler.ServeHTTP(rr, req)
 
 	return
+}
+
+// stalledLister answers nothing. It returns when the probe's context ends,
+// as an endpoint that accepts the connection and then stalls does.
+type stalledLister struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func newStalledLister() *stalledLister {
+	return &stalledLister{started: make(chan struct{})}
+}
+
+func (s *stalledLister) ListObjectsV2(ctx context.Context, _ *s3.ListObjectsV2Input, _ ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+	s.once.Do(func() { close(s.started) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// probeInBackground runs one probe against a stalled endpoint. It returns
+// the lister, the recorder, and a channel that closes when the probe ends.
+func probeInBackground(req *http.Request, timeout probeTimeout) (*stalledLister, *httptest.ResponseRecorder, chan struct{}) {
+	svc := newStalledLister()
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		probeHandler(rr, req, svc, testLogger, timeout)
+	}()
+	return svc, rr, done
+}
+
+// wantProbeEnds fails the test if the probe does not end.
+func wantProbeEnds(t *testing.T, done chan struct{}, rr *httptest.ResponseRecorder, prefix string) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the probe did not end")
+	}
+	want := `s3_list_success{bucket="mock",delimiter="",prefix="` + prefix + `"} 0`
+	if !strings.Contains(rr.Body.String(), want) {
+		t.Errorf("want %s, got:\n%s", want, rr.Body.String())
+	}
+}
+
+// A stalled endpoint must not hold the probe. The deadline ends the
+// listing, and the probe reports s3_list_success 0.
+func TestProbeEndsOnItsOwnDeadline(t *testing.T) {
+	req, _ := http.NewRequest("GET", "/probe?target=mock/stalled", nil)
+	_, rr, done := probeInBackground(req, probeTimeout{fallback: 200 * time.Millisecond})
+	wantProbeEnds(t, done, rr, "stalled")
+}
+
+// Prometheus sends the scrape timeout in a header. The probe must use it,
+// so it does not outlive the scrape and pay for pages nobody reads.
+func TestProbeEndsOnTheScrapeTimeoutHeader(t *testing.T) {
+	req, _ := http.NewRequest("GET", "/probe?target=mock/header", nil)
+	req.Header.Set(scrapeTimeoutHeader, "0.2")
+	_, rr, done := probeInBackground(req, probeTimeout{fallback: time.Hour})
+	wantProbeEnds(t, done, rr, "header")
+}
+
+// Prometheus closes the connection when it gives up. The probe must stop
+// there too.
+func TestProbeEndsWhenTheScrapeEnds(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, _ := http.NewRequest("GET", "/probe?target=mock/cancelled", nil)
+	svc, rr, done := probeInBackground(req.WithContext(ctx), probeTimeout{fallback: time.Hour})
+	<-svc.started
+	cancel()
+	wantProbeEnds(t, done, rr, "cancelled")
+}
+
+func TestProbeTimeoutBudget(t *testing.T) {
+	timeout := probeTimeout{fallback: 2 * time.Minute, offset: 500 * time.Millisecond}
+	for _, c := range []struct {
+		name   string
+		header string
+		want   time.Duration
+	}{
+		{"no header", "", 2*time.Minute - 500*time.Millisecond},
+		{"header", "30", 30*time.Second - 500*time.Millisecond},
+		{"fractional header", "1.5", 1500*time.Millisecond - 500*time.Millisecond},
+		{"header is not a number", "soon", 2*time.Minute - 500*time.Millisecond},
+		{"header is 0", "0", 2*time.Minute - 500*time.Millisecond},
+		{"header is smaller than the offset", "0.2", 200 * time.Millisecond},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			req, _ := http.NewRequest("GET", "/probe?target=mock/one", nil)
+			if c.header != "" {
+				req.Header.Set(scrapeTimeoutHeader, c.header)
+			}
+			if got := timeout.budget(req, testLogger); got != c.want {
+				t.Errorf("want %s, got %s", c.want, got)
+			}
+		})
+	}
 }
 
 // Functions to help return pointers succinctly

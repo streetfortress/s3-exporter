@@ -34,6 +34,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -96,8 +97,11 @@ type lister interface {
 	ListObjectsV2(ctx context.Context, in *s3.ListObjectsV2Input, opts ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
 }
 
-// Exporter collects one bucket/prefix (optionally by delimiter).
+// Exporter collects one bucket/prefix (optionally by delimiter). ctx
+// bounds the listing: it ends when the scrape ends, and it ends on its
+// own deadline. See probeTimeout.
 type Exporter struct {
+	ctx       context.Context
 	bucket    string
 	prefix    string
 	delimiter string
@@ -140,7 +144,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	// Continue making requests until we've listed and compared the date of every object
 	startList := time.Now()
 	for {
-		resp, err := e.svc.ListObjectsV2(context.Background(), query)
+		resp, err := e.svc.ListObjectsV2(e.ctx, query)
 		if err != nil {
 			e.logger.Error("list failed", "bucket", e.bucket, "prefix", e.prefix, "err", err)
 			// Upstream emitted this with two label values for a three-label
@@ -219,13 +223,63 @@ func probeTarget(r *http.Request) (bucket, prefix string, err error) {
 	return bucket, prefix, nil
 }
 
-func probeHandler(w http.ResponseWriter, r *http.Request, svc lister, logger *slog.Logger) {
+// scrapeTimeoutHeader carries the number of seconds Prometheus waits for
+// the scrape. Prometheus sends it on every scrape; blackbox_exporter reads
+// the same header.
+const scrapeTimeoutHeader = "X-Prometheus-Scrape-Timeout-Seconds"
+
+// probeTimeout bounds one probe. Without a bound a probe outlives its
+// scrape: Prometheus closes the connection at the scrape timeout, and the
+// exporter asks for the next page of a large prefix until the prefix ends.
+// Every page is a billable request, and the probe produces no sample. An
+// endpoint that accepts the connection and then stalls holds the goroutine
+// for as long as the process runs.
+type probeTimeout struct {
+	// fallback applies when the request has no scrape-timeout header.
+	fallback time.Duration
+	// offset keeps the probe shorter than the scrape, so the
+	// s3_list_success 0 sample reaches Prometheus before it gives up.
+	offset time.Duration
+}
+
+// budget tells how long the probe in this request can run.
+func (t probeTimeout) budget(r *http.Request, logger *slog.Logger) time.Duration {
+	d := t.fallback
+	if h := r.Header.Get(scrapeTimeoutHeader); h != "" {
+		// A bad header is not a reason to lose the probe. Log it and use
+		// the fallback.
+		seconds, err := strconv.ParseFloat(h, 64)
+		switch {
+		case err != nil:
+			logger.Warn("scrape timeout header is not a number", "header", h, "fallback", t.fallback)
+		case seconds <= 0:
+			logger.Warn("scrape timeout header is not more than 0", "header", h, "fallback", t.fallback)
+		default:
+			d = time.Duration(seconds * float64(time.Second))
+		}
+	}
+	// Subtract the offset only while the result stays more than 0.
+	if d > t.offset {
+		d -= t.offset
+	}
+	return d
+}
+
+func probeHandler(w http.ResponseWriter, r *http.Request, svc lister, logger *slog.Logger, timeout probeTimeout) {
 	bucket, prefix, err := probeTarget(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// The listing stops when Prometheus ends the scrape, and it stops on
+	// the deadline when the endpoint stalls. Both end the loop in Collect
+	// with an error, which Collect reports as s3_list_success 0.
+	ctx, cancel := context.WithTimeout(r.Context(), timeout.budget(r, logger))
+	defer cancel()
+
 	exporter := &Exporter{
+		ctx:       ctx,
 		bucket:    bucket,
 		prefix:    prefix,
 		delimiter: r.URL.Query().Get("delimiter"),
@@ -288,6 +342,8 @@ func main() {
 		endpointURL    = app.Flag("s3.endpoint-url", "Custom endpoint URL").Default("").String()
 		forcePathStyle = app.Flag("s3.force-path-style", "Custom force path style").Bool()
 		region         = app.Flag("s3.region", "Region (also AWS_REGION); some S3-compatible stores want one even when the endpoint decides it").Default("").String()
+		probeTimeoutD  = app.Flag("probe.timeout", "How long one probe can run when the request has no "+scrapeTimeoutHeader+" header").Default("2m").Duration()
+		probeOffset    = app.Flag("probe.timeout-offset", "Time to subtract from the scrape timeout, so a probe that fails still answers before Prometheus closes the connection").Default("500ms").Duration()
 	)
 
 	app.Version(version.Print(namespace + "_exporter"))
@@ -295,6 +351,16 @@ func main() {
 	kingpin.MustParse(app.Parse(os.Args[1:]))
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
+	if *probeTimeoutD <= 0 {
+		logger.Error("probe.timeout must be more than 0", "value", *probeTimeoutD)
+		os.Exit(1)
+	}
+	if *probeOffset < 0 {
+		logger.Error("probe.timeout-offset must be 0 or more", "value", *probeOffset)
+		os.Exit(1)
+	}
+	timeout := probeTimeout{fallback: *probeTimeoutD, offset: *probeOffset}
 
 	// Credentials from the environment (AWS_ACCESS_KEY_ID /
 	// AWS_SECRET_ACCESS_KEY) or the usual SDK chain.
@@ -318,7 +384,7 @@ func main() {
 
 	http.Handle(*metricsPath, promhttp.Handler())
 	http.HandleFunc(*probePath, func(w http.ResponseWriter, r *http.Request) {
-		probeHandler(w, r, svc, logger)
+		probeHandler(w, r, svc, logger, timeout)
 	})
 	http.HandleFunc(*discoveryPath, func(w http.ResponseWriter, r *http.Request) {
 		discoveryHandler(w, r, svc, logger)
