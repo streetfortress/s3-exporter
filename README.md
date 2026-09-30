@@ -21,7 +21,8 @@ Please file an issue on github if you encounter a problem or want to request a c
 - Docker Hub publishing, promu, goreleaser and the Makefile removed; the
   release is the image and the chart, and no binary.
 
-Licensed under the Apache License 2.0, as upstream (`LICENSE`).
+Licensed under the Apache License 2.0, as upstream (`LICENSE`). `NOTICE`
+names the copyright holders and the files that SFI changed.
 
 ## Source Control & Contributing
 

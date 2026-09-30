@@ -26,7 +26,15 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
       -o /s3_exporter .
 
 FROM scratch
+# The image is a distribution of a derivative work under the Apache License
+# 2.0, so it carries the license text and the attribution beside the binary.
+# A scratch image has no package manager and no docs, and /LICENSE is where
+# a reader looks.
+LABEL org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.source="https://github.com/streetfortress/s3-exporter" \
+      org.opencontainers.image.vendor="Streetfortress Industries"
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=build /src/LICENSE /src/NOTICE /
 COPY --from=build /s3_exporter /s3_exporter
 USER 65534:65534
 EXPOSE 9340/tcp

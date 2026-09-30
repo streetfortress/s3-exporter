@@ -1,0 +1,20 @@
+s3-exporter
+Copyright 2026 Streetfortress Industries
+
+This product contains software from s3_exporter.
+
+  Copyright 2018-2021 Rob Best (ribbybibby) and the s3_exporter
+  contributors.
+
+  Source:  https://github.com/ribbybibby/s3_exporter
+  License: Apache License, Version 2.0 (see LICENSE)
+
+Streetfortress Industries changed the s3_exporter source. The changed files
+are s3_exporter.go and s3_exporter_test.go. Each of these files carries a
+header that states the change. The README section "What changed from
+upstream" lists the changes.
+
+Every other file in this repository is new work of Streetfortress
+Industries, under the same Apache License, Version 2.0. This group includes
+the Helm chart under charts/, the Containerfile, the justfile, and the
+workflows under .github/ and .gitea/. These files carry no header.
