@@ -2,7 +2,8 @@
 # ghcr.io/streetfortress/s3-exporter:X.Y.Z, then the Helm chart →
 # oci://ghcr.io/streetfortress/charts/s3-exporter at the same X.Y.Z, with
 # both `version` and `appVersion` stamped from the tag: the chart's
-# default image tag IS the image built from the same commit.
+# default image tag IS the image built from the same commit. Last, the
+# GitHub Release, whose body is the commit subjects since the previous tag.
 #
 # The chart goes under `charts/`, one level below the image. An OCI
 # registry keys artifacts by path and tag regardless of type, so a chart
@@ -105,3 +106,59 @@ jobs:
           NAME=$(sed -n 's/^name: //p' "$CHART/Chart.yaml")
           helm package "$CHART" --version "$VERSION" --app-version "$VERSION" -d dist
           helm push "dist/$NAME-$VERSION.tgz" "oci://ghcr.io/$OWNER/charts"
+
+  # Waits for the chart job, so a published Release never claims artifacts
+  # that failed to push.
+  #
+  # The body is the commit subjects since the previous tag. oss/s3-exporter#23
+  # decided that s3-exporter wants no hand-written intro per release, unlike
+  # sfi/moment-tally: the changes here are dependency bumps and small fixes,
+  # and a human already reviews every merge to main and cuts every tag.
+  #
+  # `contents: write` sits on this job alone. `gh release create` needs it;
+  # the image and the chart job keep the read-only token of the workflow.
+  release:
+    runs-on: ubuntu-latest
+    needs: chart
+    permissions:
+      contents: write
+    steps:
+      # fetch-depth: 0 — the default checkout takes one commit and no tags,
+      # and cannot walk PREV..TAG.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          VERSION="${TAG#v}"
+
+          # Upstream's v0.1.0..v0.5.0 tags are ancestors of main, and a
+          # release must not list six years of upstream commits. The fork
+          # starts at this commit ("Modernize: AWS SDK v2, Go 1.26, slog"),
+          # so the range stops there when the previous tag is upstream's, or
+          # when the tag has no previous tag at all.
+          FORK_ROOT=9a5e6a8ab01ff4621b68647987293a5df7444b3b
+          PREV=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)
+          if [[ -n "$PREV" ]] && git merge-base --is-ancestor "$FORK_ROOT" "$PREV"; then
+            RANGE="$PREV..$TAG"
+            SINCE="since $PREV"
+          else
+            RANGE="$FORK_ROOT^..$TAG"
+            SINCE="since the fork"
+          fi
+
+          # A trailing (#N) is the number of a gitea pull request. The GitHub
+          # mirror numbers its own issues and pull requests, so the reference
+          # autolinks to the wrong thread there.
+          {
+            echo "### Changes $SINCE"
+            echo
+            git log --no-merges --format='- %s' "$RANGE" | sed -E 's/( \(#[0-9]+\))+$//'
+          } > notes.md
+
+          gh release create "$TAG" --title "s3-exporter $VERSION" --notes-file notes.md
