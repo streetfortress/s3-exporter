@@ -23,6 +23,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -56,19 +57,16 @@ var (
 				"s3_objects_size_sum_bytes{bucket=\"mock\",prefix=\"one\"} 1234",
 				"s3_objects{bucket=\"mock\",prefix=\"one\"} 1",
 			},
-			ListObjectsV2Response: &s3.ListObjectsV2Output{
-				Contents: []types.Object{
-					types.Object{
-						Key:          String("one"),
-						LastModified: Time(time.Date(2019, time.June, 13, 21, 0, 0, 0, time.UTC)),
-						Size:         Int64(1234),
+			Pages: []listPage{
+				{
+					Contents: []types.Object{
+						types.Object{
+							Key:          String("one"),
+							LastModified: Time(time.Date(2019, time.June, 13, 21, 0, 0, 0, time.UTC)),
+							Size:         Int64(1234),
+						},
 					},
 				},
-				IsTruncated: Bool(false),
-				KeyCount:    Int32(1),
-				MaxKeys:     Int32(1000),
-				Name:        String("mock"),
-				Prefix:      String("one"),
 			},
 		},
 		// Test no matching objects in the bucket
@@ -84,13 +82,8 @@ var (
 				"s3_objects_size_sum_bytes{bucket=\"mock\",prefix=\"none\"} 0",
 				"s3_objects{bucket=\"mock\",prefix=\"none\"} 0",
 			},
-			ListObjectsV2Response: &s3.ListObjectsV2Output{
-				Contents:    []types.Object{},
-				IsTruncated: Bool(false),
-				KeyCount:    Int32(0),
-				MaxKeys:     Int32(1000),
-				Name:        String("mock"),
-				Prefix:      String("none"),
+			Pages: []listPage{
+				{Contents: []types.Object{}},
 			},
 		},
 		// Test multiple objects
@@ -106,34 +99,111 @@ var (
 				"s3_objects_size_sum_bytes{bucket=\"mock\",prefix=\"multiple\"} 11602",
 				"s3_objects{bucket=\"mock\",prefix=\"multiple\"} 4",
 			},
-			ListObjectsV2Response: &s3.ListObjectsV2Output{
-				Contents: []types.Object{
-					types.Object{
-						Key:          String("multiple0"),
-						LastModified: Time(time.Date(2019, time.June, 13, 21, 0, 0, 0, time.UTC)),
-						Size:         Int64(1234),
-					},
-					types.Object{
-						Key:          String("multiple1"),
-						LastModified: Time(time.Date(2019, time.July, 14, 22, 0, 0, 0, time.UTC)),
-						Size:         Int64(2345),
-					},
-					types.Object{
-						Key:          String("multiple2"),
-						LastModified: Time(time.Date(2019, time.August, 15, 23, 0, 0, 0, time.UTC)),
-						Size:         Int64(3456),
-					},
-					types.Object{
-						Key:          String("multiple/0"),
-						LastModified: Time(time.Date(2019, time.September, 16, 00, 0, 0, 0, time.UTC)),
-						Size:         Int64(4567),
+			Pages: []listPage{
+				{
+					Contents: []types.Object{
+						types.Object{
+							Key:          String("multiple0"),
+							LastModified: Time(time.Date(2019, time.June, 13, 21, 0, 0, 0, time.UTC)),
+							Size:         Int64(1234),
+						},
+						types.Object{
+							Key:          String("multiple1"),
+							LastModified: Time(time.Date(2019, time.July, 14, 22, 0, 0, 0, time.UTC)),
+							Size:         Int64(2345),
+						},
+						types.Object{
+							Key:          String("multiple2"),
+							LastModified: Time(time.Date(2019, time.August, 15, 23, 0, 0, 0, time.UTC)),
+							Size:         Int64(3456),
+						},
+						types.Object{
+							Key:          String("multiple/0"),
+							LastModified: Time(time.Date(2019, time.September, 16, 00, 0, 0, 0, time.UTC)),
+							Size:         Int64(4567),
+						},
 					},
 				},
-				IsTruncated: Bool(false),
-				KeyCount:    Int32(4),
-				MaxKeys:     Int32(1000),
-				Name:        String("mock"),
-				Prefix:      String("multiple"),
+			},
+		},
+		// Test three pages. The newest object sits on page 2 and the
+		// biggest object on page 3, so a loop that keeps only one page
+		// reports a wrong date, a wrong size, or both.
+		s3ExporterTestCase{
+			Name:   "three pages",
+			Bucket: "mock",
+			Prefix: "paged",
+			ExpectedOutputLines: []string{
+				"s3_biggest_object_size_bytes{bucket=\"mock\",prefix=\"paged\"} 9000",
+				"s3_last_modified_object_date{bucket=\"mock\",prefix=\"paged\"} 1.568592e+09",
+				"s3_last_modified_object_size_bytes{bucket=\"mock\",prefix=\"paged\"} 300",
+				"s3_list_success{bucket=\"mock\",delimiter=\"\",prefix=\"paged\"} 1",
+				"s3_objects_size_sum_bytes{bucket=\"mock\",prefix=\"paged\"} 9650",
+				"s3_objects{bucket=\"mock\",prefix=\"paged\"} 5",
+			},
+			Pages: []listPage{
+				{
+					Contents: []types.Object{
+						types.Object{
+							Key:          String("paged/a"),
+							LastModified: Time(time.Date(2019, time.June, 13, 21, 0, 0, 0, time.UTC)),
+							Size:         Int64(100),
+						},
+						types.Object{
+							Key:          String("paged/b"),
+							LastModified: Time(time.Date(2019, time.June, 14, 21, 0, 0, 0, time.UTC)),
+							Size:         Int64(200),
+						},
+					},
+				},
+				{
+					// The newest object.
+					Contents: []types.Object{
+						types.Object{
+							Key:          String("paged/c"),
+							LastModified: Time(time.Date(2019, time.September, 16, 0, 0, 0, 0, time.UTC)),
+							Size:         Int64(300),
+						},
+					},
+				},
+				{
+					// The biggest object.
+					Contents: []types.Object{
+						types.Object{
+							Key:          String("paged/d"),
+							LastModified: Time(time.Date(2019, time.July, 14, 22, 0, 0, 0, time.UTC)),
+							Size:         Int64(9000),
+						},
+						types.Object{
+							Key:          String("paged/e"),
+							LastModified: Time(time.Date(2019, time.May, 1, 0, 0, 0, 0, time.UTC)),
+							Size:         Int64(50),
+						},
+					},
+				},
+			},
+		},
+		// Test a failure on page 2. The exporter must report
+		// s3_list_success 0 and no other sample.
+		s3ExporterTestCase{
+			Name:              "error on page 2",
+			Bucket:            "mock",
+			Prefix:            "paged-error",
+			ExpectListFailure: true,
+			ExpectedOutputLines: []string{
+				"s3_list_success{bucket=\"mock\",delimiter=\"\",prefix=\"paged-error\"} 0",
+			},
+			Pages: []listPage{
+				{
+					Contents: []types.Object{
+						types.Object{
+							Key:          String("paged-error/a"),
+							LastModified: Time(time.Date(2019, time.June, 13, 21, 0, 0, 0, time.UTC)),
+							Size:         Int64(100),
+						},
+					},
+				},
+				{Err: errors.New("the mock bucket refused page 2")},
 			},
 		},
 		// Test delimiter
@@ -146,18 +216,39 @@ var (
 				"s3_list_success{bucket=\"mock\",delimiter=\"/\",prefix=\"mock-prefix\"} 1",
 				"s3_common_prefixes{bucket=\"mock\",delimiter=\"/\",prefix=\"mock-prefix\"} 3",
 			},
-			ListObjectsV2Response: &s3.ListObjectsV2Output{
-				Name:   aws.String("mock"),
-				Prefix: aws.String("mock-prefix"),
-				CommonPrefixes: []types.CommonPrefix{
-					{
-						Prefix: aws.String("one"),
+			Pages: []listPage{
+				{
+					CommonPrefixes: []types.CommonPrefix{
+						{Prefix: aws.String("one")},
+						{Prefix: aws.String("two")},
+						{Prefix: aws.String("three")},
 					},
-					{
-						Prefix: aws.String("two"),
+				},
+			},
+		},
+		// Test a delimiter over two pages. The count adds up across the
+		// pages, like the object count does.
+		s3ExporterTestCase{
+			Name:      "common prefixes over two pages",
+			Bucket:    "mock",
+			Prefix:    "paged-prefix",
+			Delimiter: "/",
+			ExpectedOutputLines: []string{
+				"s3_list_success{bucket=\"mock\",delimiter=\"/\",prefix=\"paged-prefix\"} 1",
+				"s3_common_prefixes{bucket=\"mock\",delimiter=\"/\",prefix=\"paged-prefix\"} 5",
+			},
+			Pages: []listPage{
+				{
+					CommonPrefixes: []types.CommonPrefix{
+						{Prefix: aws.String("one")},
+						{Prefix: aws.String("two")},
 					},
-					{
-						Prefix: aws.String("three"),
+				},
+				{
+					CommonPrefixes: []types.CommonPrefix{
+						{Prefix: aws.String("three")},
+						{Prefix: aws.String("four")},
+						{Prefix: aws.String("five")},
 					},
 				},
 			},
@@ -167,33 +258,118 @@ var (
 
 type mockS3Client struct{}
 
-type s3ExporterTestCase struct {
-	Name                  string
-	Bucket                string
-	Prefix                string
-	Delimiter             string
-	ExpectedOutputLines   []string
-	ListObjectsV2Response *s3.ListObjectsV2Output
+// listPage is one answer from the fake client: a listing, or a failure when
+// Err is set. The fake chains the pages itself, so a test case declares the
+// contents of each page and nothing about the continuation token.
+type listPage struct {
+	Contents       []types.Object
+	CommonPrefixes []types.CommonPrefix
+	Err            error
 }
 
-// testBody tests the body returned by the exporter against the expected output
+type s3ExporterTestCase struct {
+	Name      string
+	Bucket    string
+	Prefix    string
+	Delimiter string
+	// ExpectedOutputLines holds every sample line the body must have,
+	// except s3_list_duration_seconds. The test rejects a line that this
+	// list does not name.
+	ExpectedOutputLines []string
+	// ExpectListFailure marks a case where the listing fails. Then the
+	// exporter reports no duration.
+	ExpectListFailure bool
+	Pages             []listPage
+}
+
+// testBody compares the sample lines in the body to ExpectedOutputLines,
+// line for line. A substring test accepted a wrong total, because
+// `s3_objects{bucket="mock",prefix="one"} 1` is a substring of the same
+// line that ends in 15.
 func (tc *s3ExporterTestCase) testBody(body string, t *testing.T) {
-	for _, l := range tc.ExpectedOutputLines {
-		ok := strings.Contains(body, l)
-		if !ok {
-			t.Errorf("expected %s", l)
+	t.Helper()
+
+	got := map[string]bool{}
+	haveDuration := false
+	for _, l := range strings.Split(body, "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" || strings.HasPrefix(l, "#") {
+			continue
 		}
+		// s3_list_duration_seconds holds a wall-clock value. The test
+		// cannot predict the value, so it checks the line is present.
+		if strings.HasPrefix(l, "s3_list_duration_seconds{") {
+			haveDuration = true
+			continue
+		}
+		got[l] = true
+	}
+
+	want := map[string]bool{}
+	for _, l := range tc.ExpectedOutputLines {
+		want[l] = true
+		if !got[l] {
+			t.Errorf("%s: the body must have the line %q", tc.Name, l)
+		}
+	}
+	for l := range got {
+		if !want[l] {
+			t.Errorf("%s: the body has the extra line %q", tc.Name, l)
+		}
+	}
+	if haveDuration == tc.ExpectListFailure {
+		t.Errorf("%s: s3_list_duration_seconds present=%v, want %v",
+			tc.Name, haveDuration, !tc.ExpectListFailure)
 	}
 }
 
 type s3ExporterTestCases []s3ExporterTestCase
 
-// Returns the mocked response for a bucket+prefix combination
-func (tcs *s3ExporterTestCases) response(bucket, prefix string) (*s3.ListObjectsV2Output, error) {
+// continuationToken names the page that the fake client gives out next. The
+// fake reads the token back, so a test proves that Collect sends it.
+func continuationToken(page int) string {
+	return fmt.Sprintf("page-%d", page)
+}
+
+// response returns the mocked response for a bucket, a prefix and a
+// continuation token. An empty token asks for the first page.
+func (tcs *s3ExporterTestCases) response(bucket, prefix, token string) (*s3.ListObjectsV2Output, error) {
 	for _, c := range *tcs {
-		if c.Bucket == bucket && c.Prefix == prefix {
-			return c.ListObjectsV2Response, nil
+		if c.Bucket != bucket || c.Prefix != prefix {
+			continue
 		}
+
+		page := 0
+		if token != "" {
+			page = -1
+			for i := range c.Pages {
+				if continuationToken(i) == token {
+					page = i
+					break
+				}
+			}
+			if page < 0 {
+				return nil, fmt.Errorf("unknown continuation token %q", token)
+			}
+		}
+
+		p := c.Pages[page]
+		if p.Err != nil {
+			return nil, p.Err
+		}
+		out := &s3.ListObjectsV2Output{
+			Contents:       p.Contents,
+			CommonPrefixes: p.CommonPrefixes,
+			IsTruncated:    Bool(page+1 < len(c.Pages)),
+			KeyCount:       Int32(int32(len(p.Contents))),
+			MaxKeys:        Int32(1000),
+			Name:           String(bucket),
+			Prefix:         String(prefix),
+		}
+		if page+1 < len(c.Pages) {
+			out.NextContinuationToken = String(continuationToken(page + 1))
+		}
+		return out, nil
 	}
 
 	return nil, errors.New("Can't find a response for the bucket and prefix combination")
@@ -237,6 +413,12 @@ func TestProbeHandler(t *testing.T) {
 		rr, err := probe(c.Bucket, c.Prefix, c.Delimiter)
 		if err != nil {
 			t.Error(err)
+			continue
+		}
+		// A failed listing is still a scrape: the body carries
+		// s3_list_success 0, so the status stays 200.
+		if rr.Code != http.StatusOK {
+			t.Errorf("%s: want 200, got %d", c.Name, rr.Code)
 		}
 
 		c.testBody(rr.Body.String(), t)
@@ -245,12 +427,11 @@ func TestProbeHandler(t *testing.T) {
 
 // ListObjectsV2 mocks out the corresponding function in the S3 client, returning the response that corresponds to the test case
 func (m *mockS3Client) ListObjectsV2(_ context.Context, input *s3.ListObjectsV2Input, _ ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
-	r, err := testCases.response(*input.Bucket, *input.Prefix)
-	if err != nil {
-		return nil, err
-	}
-
-	return r, nil
+	return testCases.response(
+		aws.ToString(input.Bucket),
+		aws.ToString(input.Prefix),
+		aws.ToString(input.ContinuationToken),
+	)
 }
 
 // Repeatable probe function
