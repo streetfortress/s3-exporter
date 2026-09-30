@@ -2,14 +2,22 @@
 # endpoint and serves plain HTTP, so it needs CA roots and nothing else.
 # VERSION is stamped by the release workflow from the tag; a local build
 # says "dev".
-FROM golang:1.26-alpine AS build
+#
+# The build stage runs on the builder's own architecture and cross-compiles
+# to TARGETARCH, so a multi-arch `docker buildx build --platform
+# linux/amd64,linux/arm64` needs no QEMU. A plain `docker build` sets
+# TARGETOS and TARGETARCH to the host's values, and an empty value makes go
+# use its own defaults, so a local build is unaffected.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 ARG VERSION=dev
 ARG REVISION=unknown
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
       -ldflags "-s -w \
         -X github.com/prometheus/common/version.Version=${VERSION} \
         -X github.com/prometheus/common/version.Revision=${REVISION} \

@@ -1,8 +1,8 @@
 # Local checks (mirror what CI runs on every push).
 check:
     go vet ./... && go test ./...
-    helm lint charts/helm-s3-exporter
-    helm template t charts/helm-s3-exporter --set probe.enabled=true --set 'probe.targets={b/p/}' >/dev/null
+    helm lint charts/s3-exporter
+    helm template t charts/s3-exporter --set probe.enabled=true --set 'probe.targets={b/p/}' >/dev/null
 
 # Build the image locally as s3-exporter:dev.
 image:
@@ -16,12 +16,14 @@ run endpoint region="":
         --s3.endpoint-url={{endpoint}} --s3.region={{region}} --s3.force-path-style
 
 # Release
-# Tag HEAD for release and push the tag to the internal gitea remote — the
-# tag push triggers Gitea Actions (.gitea/workflows/release.yaml), which
-# builds the image and packages the chart, both at ${TAG#v}. Accepts
-# "1.2.3" or "v1.2.3". Fetches first (pruning tags deleted on the remote)
-# and refuses to tag unless HEAD is exactly <remote>/main, so a stale
-# checkout can't ship a release.
+# Tag HEAD for release and push the tag to the internal gitea remote. The
+# ref-pusher of sfi/deployments then carries the tag to
+# github.com/streetfortress/s3-exporter, where .github/workflows/release.yml
+# builds the image and packages the chart, both at ${TAG#v}. The pusher
+# reconciles on an interval, so the release starts after that delay and not
+# at once. Accepts "1.2.3" or "v1.2.3". Fetches first (pruning tags deleted
+# on the remote) and refuses to tag unless HEAD is exactly <remote>/main, so
+# a stale checkout can't ship a release.
 tag version:
     #!/usr/bin/env bash
     set -euo pipefail

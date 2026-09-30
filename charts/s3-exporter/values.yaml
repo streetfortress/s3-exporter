@@ -1,6 +1,6 @@
 image:
-  registry: gitea.zen.lofi
-  repository: sfi/s3-exporter
+  registry: ghcr.io
+  repository: streetfortress/s3-exporter
   # Defaults to the chart's appVersion (the same tag the image was built from).
   tag: ""
   pullPolicy: IfNotPresent

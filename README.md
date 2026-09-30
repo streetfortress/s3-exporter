@@ -89,15 +89,24 @@ out listing does not reset an alert either.
 ## Installation
 
 Helm is the primary method. The chart and the image are built from this
-repository at the same tag and published together:
+repository at the same tag and published together to GHCR, from every
+`vX.Y.Z` tag:
 
 ```
-oci://gitea.zen.lofi/sfi/helm-s3-exporter     chart, version X.Y.Z
-gitea.zen.lofi/sfi/s3-exporter:X.Y.Z          image
+oci://ghcr.io/streetfortress/charts/s3-exporter   chart, version X.Y.Z
+ghcr.io/streetfortress/s3-exporter:X.Y.Z          image, amd64 + arm64
 ```
 
-(Different names on purpose: an OCI registry keys artifacts by path and
-tag regardless of type, and a same-named chart push replaces the image.)
+(The chart sits under `charts/` on purpose: an OCI registry keys artifacts
+by path and tag regardless of type, so a chart pushed to the image's own
+path would replace the image.)
+
+```
+helm install s3-exporter oci://ghcr.io/streetfortress/charts/s3-exporter \
+    --version X.Y.Z \
+    --set existingSecret=s3-exporter-credentials \
+    --set s3.endpointURL=https://s3.example-store.com
+```
 
 One release per S3 store — the credential and the endpoint go together:
 
@@ -108,7 +117,7 @@ metadata:
   name: s3-exporter-b2
   namespace: monitoring-central
 spec:
-  chartRef: {kind: OCIRepository, name: helm-s3-exporter, namespace: flux-system}
+  chartRef: {kind: OCIRepository, name: s3-exporter, namespace: flux-system}
   values:
     fullnameOverride: s3-exporter-b2
     existingSecret: s3-exporter-b2-credentials    # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
@@ -125,9 +134,13 @@ for clusters whose Prometheus selects Probes), `extraArgs`, `resources`.
 Chart `version` and `appVersion` are the same X.Y.Z, so the default image
 is the one built from the same commit.
 
-Also possible: `docker run gitea.zen.lofi/sfi/s3-exporter:X.Y.Z` with the
-credential in the environment and the flags below, or `go build .` — the
-binary is static and listens on `:9340`.
+Also possible: `docker run ghcr.io/streetfortress/s3-exporter:X.Y.Z` with
+the credential in the environment and the flags below.
+
+This repository ships **no pre-built binaries**. Upstream used goreleaser;
+this fork removed it, and a release is the image plus the chart. Build from
+source instead: `go build .` in a clone. The binary is static and listens
+on `:9340`.
 
 ## Configuration
 
@@ -277,11 +290,17 @@ just run https://s3.us-west-004.backblazeb2.com us-west-004
                 # runs the dev image with AWS_* from your environment; then
                 # curl 'localhost:9340/probe?target=BUCKET/PREFIX/'
 just tag X.Y.Z  # tags HEAD (must be at origin/main) and pushes; CI builds
-                # the image, then the chart, into the gitea registries
+                # the image, then the chart, into GHCR
 ```
 
-CI runs vet, tests, an image build and a chart lint on every push
-(`.gitea/workflows/build.yaml`); releases are `.gitea/workflows/release.yaml`.
+The repository lives on two forges. `gitea.zen.lofi/oss/s3-exporter` is the
+source of truth, and SFI publishes `main` and the `v*` tags from there to
+[github.com/streetfortress/s3-exporter](https://github.com/streetfortress/s3-exporter).
+Each forge runs its own CI: gitea runs vet, tests, an image build and a
+chart lint on every push (`.gitea/workflows/build.yaml`), and GitHub builds
+and pushes the release artifacts off a `v*` tag
+(`.github/workflows/release.yml`). See
+[CONTRIBUTING.md](CONTRIBUTING.md) for where a change goes.
 
 ## What changed from upstream
 
@@ -290,7 +309,9 @@ CI runs vet, tests, an image build and a chart lint on every push
 - `/probe?target=BUCKET/PREFIX`.
 - A refused listing is `s3_list_success 0` with a 200, not a panic.
 - `--s3.region`.
-- Helm chart, `Containerfile` (static, scratch, non-root), gitea CI.
-- Docker Hub publishing, promu, goreleaser and the Makefile removed.
+- Helm chart, `Containerfile` (static, scratch, non-root, multi-arch), CI
+  on gitea for every push and on GitHub for a release tag.
+- Docker Hub publishing, promu, goreleaser and the Makefile removed; the
+  release is the image and the chart, and no binary.
 
 Licensed under the Apache License 2.0, as upstream (`LICENSE`).

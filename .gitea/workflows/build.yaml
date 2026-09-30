@@ -24,4 +24,4 @@ jobs:
       - uses: azure/setup-helm@v4
         with:
           version: v4.1.3
-      - run: helm lint charts/helm-s3-exporter && helm template t charts/helm-s3-exporter --set probe.enabled=true --set 'probe.targets={b/p/}' >/dev/null
+      - run: helm lint charts/s3-exporter && helm template t charts/s3-exporter --set probe.enabled=true --set 'probe.targets={b/p/}' >/dev/null

@@ -1,8 +1,17 @@
 {{/*
-Chart name (nameOverride-aware, standard helm-create logic).
+The application name (nameOverride-aware). This is helm-create's logic
+with one change: the fallback is the literal "s3-exporter" and NOT
+.Chart.Name.
+
+The reason is that this helper feeds app.kubernetes.io/name, which is a
+SELECTOR label, and a Deployment's spec.selector is immutable. While the
+fallback was .Chart.Name, a rename of the chart moved the selector and
+made `helm upgrade` fail on the live release. It also made the label
+wrong: app.kubernetes.io/name is the name of the application, and
+"helm-s3-exporter" was the name of the package around it.
 */}}
 {{- define "s3-exporter.name" -}}
-{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
+{{- default "s3-exporter" .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
@@ -12,7 +21,7 @@ Fully qualified app name (release-scoped, standard helm-create logic).
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
-{{- $name := default .Chart.Name .Values.nameOverride }}
+{{- $name := include "s3-exporter.name" . }}
 {{- if contains $name .Release.Name }}
 {{- .Release.Name | trunc 63 | trimSuffix "-" }}
 {{- else }}

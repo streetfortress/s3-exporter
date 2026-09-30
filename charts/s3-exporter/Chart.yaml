@@ -2,18 +2,23 @@
 # probe-style Prometheus exporter for S3 buckets: one ListObjects per
 # probe, answering how many objects, how big, and when the newest was
 # written. The chart's own image is built from this repo; both are
-# published from CI to the gitea OCI registry (.gitea/workflows/
-# release.yaml) — cut a release with `just tag X.Y.Z`.
+# published from CI to GHCR (.github/workflows/release.yml) — cut a
+# release with `just tag X.Y.Z`. The chart goes under `charts/`:
+# oci://ghcr.io/streetfortress/charts/s3-exporter, and the image is
+# ghcr.io/streetfortress/s3-exporter.
 #
 # Scope: Deployment + Service, and an optional prometheus-operator Probe
 # whose static targets are the bucket/prefix pairs to watch. Credentials
 # come from an existing Secret; the chart never renders one.
 apiVersion: v2
-# `helm-` prefix, like helm-umami: the chart is pushed as an OCI artifact
-# to oci://gitea.zen.lofi/sfi/<chart name>, and the IMAGE built from this
-# repo is gitea.zen.lofi/sfi/s3-exporter. They must not share a path — a
-# same-named chart push replaces the image's tag (v1.0.0 did exactly that).
-name: helm-s3-exporter
+# The chart and the image share this name, and they do NOT collide: an OCI
+# registry keys artifacts by path and tag regardless of type, and the chart
+# is pushed one level down, under `charts/`. v1.0.0 learned the hazard the
+# other way — a chart push to the image's own path replaced the image — and
+# the earlier fix was to rename the chart `helm-s3-exporter`. The `charts/`
+# path makes the collision impossible instead of forbidding one name, so
+# the chart is named for the product again.
+name: s3-exporter
 description: Prometheus exporter for S3 bucket freshness and size (probe model). Fork of ribbybibby/s3_exporter.
 type: application
 sources:

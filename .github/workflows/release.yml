@@ -1,0 +1,107 @@
+# Release artifacts off vX.Y.Z tags: the image →
+# ghcr.io/streetfortress/s3-exporter:X.Y.Z, then the Helm chart →
+# oci://ghcr.io/streetfortress/charts/s3-exporter at the same X.Y.Z, with
+# both `version` and `appVersion` stamped from the tag: the chart's
+# default image tag IS the image built from the same commit.
+#
+# The chart goes under `charts/`, one level below the image. An OCI
+# registry keys artifacts by path and tag regardless of type, so a chart
+# pushed to the image's own path replaces the image — v1.0.0 did exactly
+# that. The `charts/` path makes that impossible for every chart SFI
+# publishes, so no name is forbidden and no guard has to be copied into
+# the next repository's workflow.
+#
+# This workflow runs on GitHub only. gitea.zen.lofi/oss/s3-exporter is the
+# source of truth; the ref-pusher of sfi/deployments (#612) carries
+# refs/heads/main and refs/tags/v* to github.com/streetfortress/s3-exporter.
+# That push carries a GitHub App installation token, not a workflow's
+# GITHUB_TOKEN, so it triggers this workflow. Gitea Actions never sees this
+# file: .gitea/workflows/ exists, so gitea does not fall back to
+# .github/workflows.
+#
+# Cut a release with `just tag X.Y.Z` from the repo root — it validates
+# semver, refuses unless HEAD is exactly the gitea remote's main, and
+# pushes the tag to gitea. The ref-pusher reconciles on an interval, so
+# this workflow starts after that delay and not at once.
+#
+# The owner comes from github.repository_owner and not from a literal.
+# A transfer of the repository then needs no change here — the by-hand
+# fix of oss/databasus-operator#14 is what a literal costs.
+#
+# GHCR auth is the workflow's own GITHUB_TOKEN (packages: write below) —
+# no other secret. GHCR creates a package private and gives no API for
+# the change, so a person must make the packages s3-exporter and
+# charts/s3-exporter public once, after the first tag.
+#
+# The image carries `latest` beside the version. Pin the version in
+# anything that reconciles; `latest` is for a person trying the exporter
+# by hand.
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The chart's default image tag is the chart's appVersion, which is
+      # ${TAG#v}. The image tag must drop the v for the same reason.
+      - id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # amd64 and arm64. The Containerfile cross-compiles from
+      # $BUILDPLATFORM, so the arm64 leg needs no QEMU and costs the same
+      # as the amd64 one.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            REVISION=${{ github.sha }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/s3-exporter:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/s3-exporter:latest
+
+  # Waits for the image job, so a published chart never points at a tag
+  # that does not exist yet.
+  chart:
+    runs-on: ubuntu-latest
+    needs: image
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.1.3
+
+      - name: Package and push chart
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin <<< "$GH_TOKEN"
+          CHART=charts/s3-exporter
+          NAME=$(sed -n 's/^name: //p' "$CHART/Chart.yaml")
+          helm package "$CHART" --version "$VERSION" --app-version "$VERSION" -d dist
+          helm push "dist/$NAME-$VERSION.tgz" "oci://ghcr.io/$OWNER/charts"
