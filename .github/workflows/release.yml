@@ -12,17 +12,17 @@
 # publishes, so no name is forbidden and no guard has to be copied into
 # the next repository's workflow.
 #
-# This workflow runs on GitHub only. gitea.zen.lofi/oss/s3-exporter is the
-# source of truth; the ref-pusher of sfi/deployments (#612) carries
+# This workflow runs on GitHub only. forge.streetfortress.cloud/oss/s3-exporter
+# is the source of truth; the ref-pusher of sfi/deployments (#612) carries
 # refs/heads/main and refs/tags/v* to github.com/streetfortress/s3-exporter.
 # That push carries a GitHub App installation token, not a workflow's
-# GITHUB_TOKEN, so it triggers this workflow. Gitea Actions never sees this
-# file: .gitea/workflows/ exists, so gitea does not fall back to
+# GITHUB_TOKEN, so it triggers this workflow. Forgejo Actions never sees
+# this file: .gitea/workflows/ exists, so the forge does not fall back to
 # .github/workflows.
 #
 # Cut a release with `just tag X.Y.Z` from the repo root — it validates
-# semver, refuses unless HEAD is exactly the gitea remote's main, and
-# pushes the tag to gitea. The ref-pusher reconciles on an interval, so
+# semver, refuses unless HEAD is exactly the forge remote's main, and
+# pushes the tag to the forge. The ref-pusher reconciles on an interval, so
 # this workflow starts after that delay and not at once.
 #
 # The owner comes from github.repository_owner and not from a literal.

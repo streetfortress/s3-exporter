@@ -213,10 +213,10 @@ just tag X.Y.Z  # tags HEAD (must be at origin/main) and pushes; CI builds
                 # the image, then the chart, into GHCR
 ```
 
-The repository lives on two forges. `gitea.zen.lofi/oss/s3-exporter` is the
-source of truth, and SFI publishes `main` and the `v*` tags from there to
+The repository lives on two forges. `forge.streetfortress.cloud/oss/s3-exporter`
+is the source of truth, and SFI publishes `main` and the `v*` tags from there to
 [github.com/streetfortress/s3-exporter](https://github.com/streetfortress/s3-exporter).
-Each forge runs its own CI: gitea runs vet, tests, an image build and a
+Each forge runs its own CI: the forge runs vet, tests, an image build and a
 chart lint on every push (`.gitea/workflows/build.yaml`), and GitHub builds
 and pushes the release artifacts off a `v*` tag
 (`.github/workflows/release.yml`). See

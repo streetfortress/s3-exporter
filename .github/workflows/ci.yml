@@ -1,5 +1,5 @@
 # CI for the GitHub mirror: build, vet, test, lint the chart on push to
-# main and on every pull request. gitea.zen.lofi/oss/s3-exporter runs the
+# main and on every pull request. forge.streetfortress.cloud/oss/s3-exporter runs the
 # same checks on every branch push via .gitea/workflows/build.yaml; this
 # file exists so a pull request against the mirror — the only way an
 # outside contributor can send a change, per CONTRIBUTING.md — gets a

@@ -16,15 +16,15 @@ run endpoint region="":
         --s3.endpoint-url={{endpoint}} --s3.region={{region}} --s3.force-path-style
 
 # Release
-# Tag HEAD and push the tag to the gitea remote. Accepts "1.2.3" or
+# Tag HEAD and push the tag to the forge remote. Accepts "1.2.3" or
 # "v1.2.3". Fetches first (pruning tags deleted on the remote) and refuses
 # to tag unless HEAD is exactly <remote>/main, so a stale checkout can't
 # ship a release.
 tag version:
     #!/usr/bin/env bash
     set -euo pipefail
-    remote=$(git remote -v | awk '/gitea\.zen\.lofi.*\(push\)/ {print $1; exit}')
-    [[ -n "$remote" ]] || { echo "error: no gitea.zen.lofi remote configured" >&2; exit 1; }
+    remote=$(git remote -v | awk '/forge\.streetfortress\.cloud.*\(push\)/ {print $1; exit}')
+    [[ -n "$remote" ]] || { echo "error: no forge.streetfortress.cloud remote configured" >&2; exit 1; }
     v="{{version}}"
     v="${v#v}"
     [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
