@@ -18,11 +18,7 @@ spec:
         {{- include "s3-exporter.labels" . | nindent 8 }}
     spec:
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 65534
-        runAsGroup: 65534
-        seccompProfile:
-          type: RuntimeDefault
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: s3-exporter
           image: {{ include "s3-exporter.image" . }}
